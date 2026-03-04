@@ -43,7 +43,7 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
     abstract protected function extraerProductosDeRespuesta(string $body, string $urlPagina): array;
 
     /**
-     * Configura el cliente Guzzle con cabeceras de Chrome 131 (Windows) y soporte para proxy.
+     * Configura el cliente Guzzle con cabeceras de Chrome (Windows 11), allow_redirects y proxy.
      * Proxy: config('services.{clave}.proxy'), ej. config('services.walmart.proxy').
      */
     protected function configurarCliente(): Client
@@ -74,23 +74,23 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
     }
 
     /**
-     * Cabeceras de sesión que simulan Chrome en Windows 10 (visita humana).
-     * Referer de Google México para simular que venimos de una búsqueda.
+     * Cabeceras de sesión que simulan Chrome en Windows 11 (visita humana).
+     * User-Agent moderno y Accept-Language es-MX para reducir bloqueos.
      */
     protected function obtenerCabecerasNavegador(string $refererBase): array
     {
         return [
-            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language' => 'es-MX,es;q=0.9,en;q=0.8',
+            'Accept-Language' => 'es-MX,es;q=0.9',
             'Accept-Encoding' => 'gzip, deflate, br',
-            'Referer' => 'https://www.google.com.mx/',
+            'Referer' => rtrim($refererBase, '/') . '/',
             'Upgrade-Insecure-Requests' => '1',
             'Sec-Fetch-Dest' => 'document',
             'Sec-Fetch-Mode' => 'navigate',
             'Sec-Fetch-Site' => 'none',
             'Sec-Fetch-User' => '?1',
-            'Sec-Ch-Ua' => '"Google Chrome";v="121", "Chromium";v="121", "Not_A Brand";v="24"',
+            'Sec-Ch-Ua' => '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
             'Sec-Ch-Ua-Mobile' => '?0',
             'Sec-Ch-Ua-Platform' => '"Windows"',
             'Cache-Control' => 'max-age=0',

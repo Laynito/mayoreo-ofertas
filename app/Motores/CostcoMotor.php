@@ -2,17 +2,24 @@
 
 namespace App\Motores;
 
+use GuzzleHttp\Cookie\CookieJar;
+use GuzzleHttp\Client;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Costco México.
- * Usa Guzzle vía BaseMotorRastreador.
+ * Usa Guzzle vía BaseMotorRastreador. Pide primero la Home (/) para obtener cookies de sesión.
  */
 class CostcoMotor extends BaseMotorRastreador
 {
     protected const URL_BASE = 'https://www.costco.com.mx';
 
-    protected const RUTA_OFERTAS = 'ofertas';
+    /** Ruta actual de ofertas (404 en /ofertas). */
+    protected const RUTA_OFERTAS = 'c/ofertas';
+
+    protected const RUTA_OFERTAS_ALT = 'treasure-hunt';
+
+    protected ?CookieJar $cookieJar = null;
 
     protected function getUrlBase(): string
     {
@@ -30,6 +37,77 @@ class CostcoMotor extends BaseMotorRastreador
     }
 
     /**
+     * Cliente con CookieJar para persistir cookies de la Home y enviarlas en ofertas.
+     */
+    protected function configurarCliente(): Client
+    {
+        if ($this->cliente !== null) {
+            return $this->cliente;
+        }
+        $this->cookieJar = new CookieJar;
+        $urlBase = $this->getUrlBase();
+        $opciones = [
+            'timeout' => 15,
+            'connect_timeout' => 10,
+            'allow_redirects' => true,
+            'cookies' => $this->cookieJar,
+            'headers' => $this->obtenerCabecerasNavegador($urlBase),
+        ];
+        $proxy = config('services.costco.proxy');
+        if (! empty($proxy)) {
+            $opciones['proxy'] = $proxy;
+        }
+        $this->cliente = new Client($opciones);
+        return $this->cliente;
+    }
+
+    /**
+     * Primero pide la Home (/) para obtener cookies; luego la página de ofertas.
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    public function recolectarDatos(): array
+    {
+        $this->peticionesRealizadas = 0;
+        $base = rtrim($this->getUrlBase(), '/');
+        $this->configurarCliente();
+
+        $homeUrl = $base . '/';
+        $resultadoHome = $this->realizarPeticion($homeUrl);
+        if ($resultadoHome === null) {
+            Log::info(static::class . ': fallo petición a Home', ['url' => $homeUrl]);
+        }
+
+        $urlOfertas = $base . '/' . ltrim($this->getRutaOfertas(), '/');
+        $resultado = $this->realizarPeticion($urlOfertas);
+        if ($resultado === null) {
+            Log::info(static::class . ': sin respuesta ofertas', ['url' => $urlOfertas]);
+            return [];
+        }
+        if ($resultado['status'] === 404) {
+            $urlAlt = $base . '/' . ltrim(self::RUTA_OFERTAS_ALT, '/');
+            $resultado = $this->realizarPeticion($urlAlt);
+            if ($resultado === null || $resultado['status'] !== 200) {
+                Log::info(static::class . ': 404 en c/ofertas y fallo en alternate', ['url_alt' => $urlAlt]);
+                return [];
+            }
+            $urlOfertas = $urlAlt;
+        } elseif ($resultado['status'] !== 200) {
+            Log::info(static::class . ': respuesta no 200', ['url' => $urlOfertas, 'status' => $resultado['status']]);
+        }
+
+        $productos = $this->extraerProductosDeRespuesta($resultado['body'], $urlOfertas);
+        if (empty($productos)) {
+            Log::warning('CostcoMotor: no se extrajeron productos.', [
+                'url' => $urlOfertas,
+                'status' => $resultado['status'],
+                'interpretacion' => $resultado['status'] === 403 ? 'posible bloqueo (403)' : 'cambio de estructura',
+            ]);
+        }
+        return $productos;
+    }
+
+    /**
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     protected function extraerProductosDeRespuesta(string $body, string $urlPagina): array
@@ -41,10 +119,6 @@ class CostcoMotor extends BaseMotorRastreador
                 $productos = $this->mapearDesdeNextData($json);
             }
         }
-        if (empty($productos)) {
-            Log::debug('CostcoMotor: no se extrajeron productos (posible bloqueo o cambio de estructura).');
-        }
-
         return $productos;
     }
 

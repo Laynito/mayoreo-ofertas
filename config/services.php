@@ -87,5 +87,8 @@ return [
     'sams_club' => [
         'proxy' => env('SAMSCLUB_HTTP_PROXY'),
     ],
+    'calimax' => [
+        'proxy' => env('CALIMAX_HTTP_PROXY'),
+    ],
 
 ];

@@ -5,6 +5,7 @@ namespace App\Fabrica;
 use App\Contratos\RastreadorTiendaInterface;
 use App\Motores\AmazonMexicoMotor;
 use App\Motores\BodegaAurreraMotor;
+use App\Motores\CalimaxMotor;
 use App\Motores\ChedrauiMotor;
 use App\Motores\CoppelMotor;
 use App\Motores\CostcoMotor;
@@ -32,6 +33,7 @@ class RastreadorFabrica
         'mercado libre' => MercadoLibreMotor::class,
         'elektra' => ElektraMotor::class,
         'coppel' => CoppelMotor::class,
+        'calimax' => CalimaxMotor::class,
         'liverpool' => LiverpoolMotor::class,
         'bodega aurrera' => BodegaAurreraMotor::class,
         'chedraui' => ChedrauiMotor::class,
@@ -93,6 +95,7 @@ class RastreadorFabrica
             'mercado libre' => 'Mercado Libre',
             'elektra' => 'Elektra',
             'coppel' => 'Coppel',
+            'calimax' => 'Calimax',
             'liverpool' => 'Liverpool',
             'bodega aurrera' => 'Bodega Aurrera',
             'chedraui' => 'Chedraui',
