@@ -1,0 +1,19 @@
+# Reglas de Desarrollo para mayoreo.cloud
+
+## Idioma y Estilo
+- Todo el código (variables, métodos, comentarios, logs) DEBE estar en ESPAÑOL.
+- Sigue las convenciones de Laravel 12 y PHP 8.4 (tipado estricto).
+
+## Reglas de Negocio Críticas
+- Restricción de Descuentos: Si `permite_descuento_adicional` es false en el modelo Producto, NO aplicar ninguna lógica de oferta extra.
+- Identificación: Los productos son únicos por `tienda_origen` + `sku_tienda`.
+- Historial: Cada cambio de precio debe disparar la creación de un registro en `historial_precios`.
+- Afiliados: Usar siempre `CalculadoraOfertas` para procesar URLs con IDs de Admitad.
+
+## Arquitectura de Rastreo
+- Motores: Deben estar en `app/Motores` y seguir la interfaz `RastreadorTiendaInterface`.
+- Fábrica: Usar `app/Fabrica/RastreadorFabrica` para instanciar motores.
+- Evasión de Bloqueos: Usar Guzzle con headers de navegador real (Chrome moderno) y evitar `Http::get` simple.
+
+## Estructura de Carpetas
+- No duplicar lógica. Los Scrapers van en `Motores`, la lógica de cálculo en `Services` y la gestión en Filament/Comandos.
