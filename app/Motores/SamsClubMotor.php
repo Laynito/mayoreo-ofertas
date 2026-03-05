@@ -112,27 +112,21 @@ class SamsClubMotor extends BaseMotorRastreador
 
         $urlApi = $base . self::API_SHOWCASE . '?searchString=ofertas';
         $resultadoApi = $this->realizarPeticion($urlApi);
+        $apiBloqueada = $resultadoApi !== null && ($resultadoApi['status'] === 401 || $resultadoApi['status'] === 403);
 
-        if ($resultadoApi !== null && ($resultadoApi['status'] === 401 || $resultadoApi['status'] === 403)) {
+        if ($apiBloqueada) {
             Log::error('API Bloqueada', ['cuerpo' => $resultadoApi['body'], 'url' => $urlApi, 'status' => $resultadoApi['status']]);
         }
 
         if ($resultadoApi !== null && $resultadoApi['status'] === 200) {
-            $body = $resultadoApi['body'];
-            $data = json_decode($body, true);
-            if (! is_array($data) && $body !== '') {
-                Log::warning('SamsClubMotor: respuesta API no es JSON (posible Captcha).', [
-                    'inicio_respuesta' => mb_substr($body, 0, 500),
-                    'url' => $urlApi,
-                ]);
-            }
-            $productos = $this->extraerDesdeApiShowcase($body);
+            $productos = $this->extraerDesdeApiShowcase($resultadoApi['body']);
             if (! empty($productos)) {
                 Log::info(static::class . ': productos obtenidos vía API showcase', ['total' => count($productos)]);
                 return $productos;
             }
         }
 
+        // Cuando la API está bloqueada o no devuelve datos: priorizar HTML y extraer __NEXT_DATA__ directamente.
         $urlOfertas = $base . '/' . ltrim($this->getRutaOfertas(), '/');
         $resultado = $this->realizarPeticion($urlOfertas);
         if ($resultado === null) {
@@ -140,7 +134,11 @@ class SamsClubMotor extends BaseMotorRastreador
             return [];
         }
 
+        // Extraer de __NEXT_DATA__ aunque la respuesta sea 404 (Next.js puede devolver 404 con body con datos).
         $productos = $this->extraerProductosDeRespuesta($resultado['body'], $urlOfertas);
+        if (! empty($productos)) {
+            Log::info(static::class . ': productos obtenidos desde __NEXT_DATA__ (HTML)', ['total' => count($productos)]);
+        }
         if (empty($productos) && $resultado['status'] === 404) {
             $urlAlt = $base . '/' . ltrim(self::RUTA_OFERTAS_ALT, '/');
             $resultadoAlt = $this->realizarPeticion($urlAlt);
@@ -281,17 +279,34 @@ class SamsClubMotor extends BaseMotorRastreador
     }
 
     /**
+     * Extrae lista de productos desde __NEXT_DATA__. Prueba varias rutas (pageProps, initialState, buildId).
+     *
      * @param  array<string, mixed>  $data
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     protected function mapearDesdeNextData(array $data): array
     {
-        $items = $data['props']['pageProps']['products'] ?? $data['props']['pageProps']['items'] ?? [];
+        $items = $data['props']['pageProps']['products'] ?? $data['props']['pageProps']['items'] ?? null;
+        if (! is_array($items)) {
+            $items = $data['props']['pageProps']['initialState'] ?? null;
+            if (is_array($items)) {
+                $items = $items['products'] ?? $items['items'] ?? $items['searchResult']['products'] ?? $items['productSummaries'] ?? [];
+            }
+        }
+        if (! is_array($items)) {
+            $items = $data['props']['initialState'] ?? [];
+            if (is_array($items)) {
+                $items = $items['products'] ?? $items['items'] ?? $items['search'] ?? [];
+            }
+        }
         if (! is_array($items)) {
             return [];
         }
         $productos = [];
         foreach (array_slice($items, 0, 50) as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
             $m = $this->normalizarItem($item);
             if ($m !== null) {
                 $productos[] = $m;

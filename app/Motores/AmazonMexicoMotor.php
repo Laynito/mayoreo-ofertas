@@ -285,8 +285,10 @@ class AmazonMexicoMotor extends BaseMotorRastreador
     }
 
     /**
-     * Extracción por DOM: primero .s-result-item (clase de resultados de búsqueda), luego cualquier data-asin.
-     * Precio desde .a-offscreen (se limpia $ y , antes de convertir a decimal).
+     * Extracción por DOM: varios selectores porque Amazon cambia clases con frecuencia.
+     * 1) .s-result-item + data-asin, 2) data-component-type="s-search-result", 3) cualquier data-asin,
+     * 4) fallback: ASIN desde enlaces /dp/ o /gp/product/ y tarjeta desde ancestro del enlace.
+     * Precio desde .a-offscreen o .a-price.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -300,16 +302,37 @@ class AmazonMexicoMotor extends BaseMotorRastreador
         }
         $xpath = new DOMXPath($dom);
 
-        // Preferir contenedores .s-result-item (selector estable de Amazon para resultados)
+        // 1) Contenedores con data-asin (Amazon puede cambiar la clase, por eso probamos varias)
         $nodos = $xpath->query("//div[contains(concat(' ', normalize-space(@class), ' '), ' s-result-item ') and @data-asin and string-length(normalize-space(@data-asin)) > 0]");
         if ($nodos === false || $nodos->length === 0) {
-            // Fallback: cualquier elemento con data-asin no vacío
-            $nodos = $xpath->query("//*[@data-asin and string-length(normalize-space(@data-asin)) > 0]");
+            $nodos = $xpath->query("//*[@data-component-type='s-search-result' and @data-asin and string-length(normalize-space(@data-asin)) > 0]");
         }
         if ($nodos === false || $nodos->length === 0) {
-            return [];
+            $nodos = $xpath->query("//*[@data-asin and string-length(normalize-space(@data-asin)) > 0 and not(ancestor::*[@data-asin])]");
+        }
+        if ($nodos !== false && $nodos->length > 0) {
+            $productos = $this->mapearNodosAProductos($xpath, $nodos);
         }
 
+        // 2) Fallback sin data-asin: extraer ASIN desde enlaces /dp/ o /gp/product/ y usar ancestro como tarjeta
+        if (empty($productos)) {
+            $productos = $this->extraerDesdeEnlacesConAsin($xpath, $dom);
+        }
+
+        libxml_clear_errors();
+
+        return $productos;
+    }
+
+    /**
+     * Convierte nodos DOM (con data-asin) a array de productos.
+     *
+     * @param  \DOMNodeList<\DOMNode>  $nodos
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function mapearNodosAProductos(DOMXPath $xpath, \DOMNodeList $nodos): array
+    {
+        $productos = [];
         $asinsVistos = [];
         foreach ($nodos as $nodo) {
             $asin = $nodo instanceof \DOMElement ? trim($nodo->getAttribute('data-asin')) : '';
@@ -322,7 +345,6 @@ class AmazonMexicoMotor extends BaseMotorRastreador
             $nombre = $this->extraerNombreDesdeNodo($xpath, $nodo);
             $imagenUrl = $this->extraerImagenDesdeNodo($xpath, $nodo);
 
-            // Solo incluir si tenemos al menos ASIN y (precio o nombre)
             if ($precio === null && $nombre === '') {
                 continue;
             }
@@ -344,26 +366,140 @@ class AmazonMexicoMotor extends BaseMotorRastreador
                 'url_original' => $urlOriginal,
             ];
         }
-        libxml_clear_errors();
 
         return $productos;
     }
 
     /**
-     * Precio desde .a-offscreen dentro del nodo (selector robusto Amazon).
+     * Cuando no hay data-asin: busca enlaces a /dp/ o /gp/product/, extrae ASIN del href
+     * y usa el ancestro del enlace (tarjeta) para precio/nombre/imagen.
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function extraerDesdeEnlacesConAsin(DOMXPath $xpath, DOMDocument $dom): array
+    {
+        $productos = [];
+        $enlaces = $xpath->query("//a[contains(@href, '/dp/') or contains(@href, '/gp/product/')]");
+        if ($enlaces === false || $enlaces->length === 0) {
+            return [];
+        }
+
+        $asinsVistos = [];
+        foreach ($enlaces as $link) {
+            if (! $link instanceof \DOMElement) {
+                continue;
+            }
+            $href = trim($link->getAttribute('href') ?? '');
+            $asin = $this->extraerAsinDeHref($href);
+            if ($asin === '' || strlen($asin) < 10 || isset($asinsVistos[$asin])) {
+                continue;
+            }
+
+            $tarjeta = $this->obtenerTarjetaProductoDesdeEnlace($xpath, $link);
+            if ($tarjeta === null) {
+                continue;
+            }
+
+            $precio = $this->extraerPrecioDesdeNodo($xpath, $tarjeta);
+            $nombre = $this->extraerNombreDesdeNodo($xpath, $tarjeta);
+            if ($nombre === '' && $link->textContent !== null) {
+                $nombre = trim($link->textContent);
+            }
+            $imagenUrl = $this->extraerImagenDesdeNodo($xpath, $tarjeta);
+
+            if ($precio === null && $nombre === '') {
+                continue;
+            }
+
+            $asinsVistos[$asin] = true;
+            $urlOriginal = str_starts_with($href, 'http') ? $href : (self::URL_BASE . '/' . ltrim(explode('?', $href)[0], '/'));
+            $precioFloat = $precio !== null ? (float) $precio : 0.0;
+
+            $productos[] = [
+                'sku_tienda' => 'AMZ-' . $asin,
+                'nombre' => $nombre !== '' ? $nombre : 'Producto Amazon ' . $asin,
+                'precio_original' => round($precioFloat, 2),
+                'precio_oferta' => $precioFloat > 0 ? round($precioFloat, 2) : null,
+                'imagen_url' => $imagenUrl !== '' ? $imagenUrl : null,
+                'url_original' => $urlOriginal,
+            ];
+        }
+
+        return $productos;
+    }
+
+    /**
+     * Extrae ASIN del href (formato /dp/B08N5WRWNW o /gp/product/B08N5WRWNW).
+     */
+    protected function extraerAsinDeHref(string $href): string
+    {
+        if (preg_match('#/(?:dp|gp/product)/([A-Z0-9]{10})#i', $href, $m)) {
+            return strtoupper($m[1]);
+        }
+
+        return '';
+    }
+
+    /**
+     * Sube desde el enlace hasta un ancestro que contenga .a-offscreen o .a-price (tarjeta de producto).
+     */
+    protected function obtenerTarjetaProductoDesdeEnlace(DOMXPath $xpath, \DOMElement $enlace): ?\DOMNode
+    {
+        $nodo = $enlace->parentNode;
+        $maxNiveles = 15;
+        $nivel = 0;
+        while ($nodo !== null && $nivel < $maxNiveles) {
+            $spans = $xpath->query(".//span[contains(concat(' ', normalize-space(@class), ' '), ' a-offscreen ') or contains(concat(' ', normalize-space(@class), ' '), ' a-price ')]", $nodo);
+            if ($spans !== false && $spans->length > 0) {
+                return $nodo;
+            }
+            $nodo = $nodo->parentNode;
+            $nivel++;
+        }
+
+        return $enlace->parentNode;
+    }
+
+    /**
+     * Precio desde .a-offscreen (principal) o .a-price; fallback: cualquier span con texto $número.
      */
     protected function extraerPrecioDesdeNodo(DOMXPath $xpath, \DOMNode $nodo): ?float
     {
         $spans = $xpath->query(".//span[contains(concat(' ', normalize-space(@class), ' '), ' a-offscreen ')]", $nodo);
-        if ($spans === false || $spans->length === 0) {
-            return null;
+        if ($spans !== false && $spans->length > 0) {
+            $texto = trim($spans->item(0)->textContent ?? '');
+            if ($texto !== '') {
+                $p = $this->parsearPrecioAmazon($texto);
+                if ($p !== null) {
+                    return $p;
+                }
+            }
         }
-        $texto = trim($spans->item(0)->textContent ?? '');
-        if ($texto === '') {
-            return null;
+        $spans = $xpath->query(".//span[contains(concat(' ', normalize-space(@class), ' '), ' a-price ')]", $nodo);
+        if ($spans !== false && $spans->length > 0) {
+            $texto = trim($spans->item(0)->textContent ?? '');
+            if ($texto !== '') {
+                $p = $this->parsearPrecioAmazon($texto);
+                if ($p !== null) {
+                    return $p;
+                }
+            }
+        }
+        // Fallback: cualquier span cuyo texto parezca precio ($ 1,234.56 o similar)
+        $todos = $xpath->query(".//span", $nodo);
+        if ($todos !== false) {
+            foreach ($todos as $span) {
+                $texto = trim($span->textContent ?? '');
+                if (preg_match('/\$[\s\d,.]+\d/', $texto) && strlen($texto) < 30) {
+                    $p = $this->parsearPrecioAmazon($texto);
+                    if ($p !== null) {
+                        return $p;
+                    }
+                }
+            }
         }
 
-        return $this->parsearPrecioAmazon($texto);
+        return null;
     }
 
     /**
@@ -388,22 +524,24 @@ class AmazonMexicoMotor extends BaseMotorRastreador
     }
 
     /**
-     * Nombre/título: texto del enlace al producto o h2.
+     * Nombre/título: h2 (s-line-clamp o a-text-normal), luego enlace a /dp/, luego cualquier a con href /dp/.
      */
     protected function extraerNombreDesdeNodo(DOMXPath $xpath, \DOMNode $nodo): string
     {
-        $h2 = $xpath->query(".//h2[contains(concat(' ', normalize-space(@class), ' '), ' s-line-clamp ')]", $nodo);
+        $h2 = $xpath->query(".//h2[contains(concat(' ', normalize-space(@class), ' '), ' s-line-clamp ') or contains(concat(' ', normalize-space(@class), ' '), ' a-text-normal ')]", $nodo);
         if ($h2 !== false && $h2->length > 0) {
             $texto = trim($h2->item(0)->textContent ?? '');
-            if ($texto !== '') {
+            if ($texto !== '' && strlen($texto) > 3) {
                 return $texto;
             }
         }
-        $link = $xpath->query(".//a[contains(@href, '/dp/')]", $nodo);
+        $link = $xpath->query(".//a[contains(@href, '/dp/') or contains(@href, '/gp/product/')]", $nodo);
         if ($link !== false && $link->length > 0) {
-            $texto = trim($link->item(0)->textContent ?? '');
-            if ($texto !== '') {
-                return $texto;
+            foreach ($link as $a) {
+                $texto = trim($a->textContent ?? '');
+                if ($texto !== '' && strlen($texto) > 3 && ! preg_match('/^\d+$/', $texto)) {
+                    return $texto;
+                }
             }
         }
 

@@ -4,9 +4,11 @@ namespace App\Console\Commands\Concerns;
 
 use App\Fabrica\RastreadorFabrica;
 use App\Jobs\EnviarOfertaTelegramJob;
+use App\Jobs\ProcesarBajadaDePrecioJob;
 use App\Models\Configuracion;
 use App\Models\HistorialPrecio;
 use App\Models\Producto;
+use App\Services\EstadoMotorService;
 use App\Services\NotificadorTelegram;
 use Illuminate\Support\Facades\Log;
 
@@ -34,15 +36,12 @@ trait RastreoTiendaComando
             return 1;
         }
 
-        $this->info("Rastreando ofertas de [{$tiendaOrigen}]...");
-
-        if (in_array($tiendaOrigen, ['Coppel', 'Calimax'], true)) {
-            try {
-                (new NotificadorTelegram)->enviarMensajeSimple("Iniciando rastreo de {$tiendaOrigen}...");
-            } catch (\Throwable $e) {
-                Log::warning('RastrearTienda: no se pudo enviar mensaje inicial a Telegram', ['mensaje' => $e->getMessage()]);
-            }
+        if (app(EstadoMotorService::class)->estaBloqueado($tiendaOrigen)) {
+            $this->warn("Motor [{$tiendaOrigen}] marcado como bloqueado. Reactívalo desde Admin → Estado de motores.");
+            return 0;
         }
+
+        $this->info("Rastreando ofertas de [{$tiendaOrigen}]...");
 
         if ($max !== null && $max > 0) {
             $this->info("Límite de productos: {$max} (modo ágil).");
@@ -173,6 +172,11 @@ trait RastreoTiendaComando
         }
         if (! empty($historialInserts)) {
             HistorialPrecio::insert($historialInserts);
+            // Encolar detección de bajadas históricas (≥20% vs registro anterior) con captura Browsershot.
+            $idsConCambio = array_unique(array_column($historialInserts, 'producto_id'));
+            if (! empty($idsConCambio)) {
+                ProcesarBajadaDePrecioJob::dispatch($idsConCambio)->delay(now()->addMinutes(1));
+            }
         }
 
         $porcentajeMinimo = Configuracion::porcentajeMinimoNotificacion();

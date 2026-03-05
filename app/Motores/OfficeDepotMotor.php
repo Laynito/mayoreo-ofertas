@@ -45,12 +45,38 @@ class OfficeDepotMotor extends BaseMotorRastreador
 
         $productos = $this->extraerDesdeDom($body);
         if (! empty($productos)) {
-            return array_slice($productos, 0, 50);
+            $productos = array_slice($productos, 0, 50);
         }
 
-        Log::debug('OfficeDepotMotor: no se extrajeron productos (posible bloqueo o cambio de estructura).');
+        if (empty($productos)) {
+            Log::info('OfficeDepotMotor: no se extrajeron productos (posible bloqueo, captcha o cambio de estructura en la página).', ['url' => $urlPagina]);
+            return [];
+        }
 
-        return [];
+        // No devolver productos sin precios válidos (evitar guardar $0 en BD y que no aparezcan en mayoreo.cloud)
+        $validos = $this->filtrarProductosConPrecioValido($productos);
+        if (count($validos) === 0) {
+            Log::info('OfficeDepotMotor: se extrajeron productos pero ninguno tiene precio válido (todos filtrados).', [
+                'url' => $urlPagina,
+                'extraidos_sin_filtrar' => count($productos),
+            ]);
+        }
+        return $validos;
+    }
+
+    /**
+     * Excluye productos con precio_original 0 y sin oferta para no guardar registros sin información útil.
+     *
+     * @param  array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>  $productos
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function filtrarProductosConPrecioValido(array $productos): array
+    {
+        return array_values(array_filter($productos, function (array $p) {
+            $tienePrecioOriginal = isset($p['precio_original']) && (float) $p['precio_original'] > 0;
+            $tieneOferta = isset($p['precio_oferta']) && $p['precio_oferta'] !== null && (float) $p['precio_oferta'] > 0;
+            return $tienePrecioOriginal || $tieneOferta;
+        }));
     }
 
     /**
@@ -68,12 +94,17 @@ class OfficeDepotMotor extends BaseMotorRastreador
             return [];
         }
         $props = $json['props']['pageProps'] ?? $json['props'] ?? [];
-        $items = $props['products'] ?? $props['productGrid'] ?? $props['initialState']['products'] ?? $props['items'] ?? [];
+        $items = $props['products'] ?? $props['productGrid'] ?? $props['data']['products'] ?? $props['initialState']['products'] ?? $props['items'] ?? [];
         if (! is_array($items)) {
             return [];
         }
         $productos = [];
         foreach (array_slice($items, 0, 50) as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            // Algunas tiendas envuelven el producto en .product o .data
+            $item = $item['product'] ?? $item['data'] ?? $item;
             $n = $this->normalizarItem($item);
             if ($n !== null) {
                 $productos[] = $n;
@@ -185,8 +216,8 @@ class OfficeDepotMotor extends BaseMotorRastreador
             return null;
         }
         $skuTienda = 'OD-' . ($sku ?: substr(md5($nombre), 0, 12));
-        $precioOferta = $this->precioANumero($item['price'] ?? $item['salePrice'] ?? $item['currentPrice'] ?? null);
-        $precioOriginal = $this->precioANumero($item['basePrice'] ?? $item['listPrice'] ?? $item['originalPrice'] ?? null) ?? $precioOferta;
+        $precioOferta = $this->extraerPrecioDesdeItem($item, true);
+        $precioOriginal = $this->extraerPrecioDesdeItem($item, false) ?? $precioOferta;
         if ($precioOriginal === null) {
             $precioOriginal = $precioOferta ?? 0.0;
         }
@@ -210,6 +241,112 @@ class OfficeDepotMotor extends BaseMotorRastreador
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
             'url_original' => $urlOriginal ? (string) $urlOriginal : null,
         ];
+    }
+
+    /**
+     * Extrae precio de un ítem buscando en campos planos y anidados (pricing, priceInfo, SAP/Hybris, etc.).
+     *
+     * @param  array<string, mixed>  $item
+     */
+    protected function extraerPrecioDesdeItem(array $item, bool $oferta): ?float
+    {
+        if ($oferta) {
+            $candidatos = [
+                $item['price'] ?? null,
+                $item['salePrice'] ?? null,
+                $item['currentPrice'] ?? null,
+                $item['promoPrice'] ?? null,
+                $item['pricing']['salePrice'] ?? null,
+                $item['pricing']['price'] ?? null,
+                $item['pricing']['currentPrice'] ?? null,
+                $item['priceInfo']['salePrice'] ?? null,
+                $item['priceInfo']['price'] ?? null,
+                isset($item['prices'][0]) ? $item['prices'][0] : null,
+                $item['formattedPrice'] ?? null,
+                $item['priceFormatted'] ?? null,
+                $item['salePriceFormatted'] ?? null,
+                $item['price']['value'] ?? null,
+                $item['price']['formattedValue'] ?? null,
+                $item['variants'][0]['price']['value'] ?? null,
+                $item['variants'][0]['price'] ?? null,
+            ];
+        } else {
+            $candidatos = [
+                $item['basePrice'] ?? null,
+                $item['listPrice'] ?? null,
+                $item['originalPrice'] ?? null,
+                $item['regularPrice'] ?? null,
+                $item['pricing']['listPrice'] ?? null,
+                $item['pricing']['basePrice'] ?? null,
+                $item['pricing']['originalPrice'] ?? null,
+                $item['priceInfo']['listPrice'] ?? null,
+                $item['priceInfo']['originalPrice'] ?? null,
+                $item['listPriceFormatted'] ?? null,
+                $item['originalPriceFormatted'] ?? null,
+                $item['priceRange']['min']['value'] ?? null,
+                $item['variants'][0]['listPrice']['value'] ?? null,
+                $item['variants'][0]['listPrice'] ?? null,
+            ];
+        }
+        foreach ($candidatos as $valor) {
+            if ($valor === null) {
+                continue;
+            }
+            if (is_array($valor) && isset($valor['value'])) {
+                $valor = $valor['value'];
+            }
+            $num = $this->precioANumero($valor);
+            if ($num !== null && $num > 0) {
+                return $num;
+            }
+        }
+        // Fallback: buscar en el ítem cualquier número que parezca precio (1 - 9999999)
+        $encontrado = $this->buscarPrecioEnArray($item, $oferta);
+        if ($encontrado !== null) {
+            return $encontrado;
+        }
+        return null;
+    }
+
+    /**
+     * Busca recursivamente un valor numérico que parezca precio (evita nombres con números).
+     *
+     * @param  array<string, mixed>  $arr
+     * @param  bool  $preferirMenor  true = oferta (menor), false = original (mayor)
+     */
+    protected function buscarPrecioEnArray(array $arr, bool $preferirMenor, int $profundidad = 0): ?float
+    {
+        if ($profundidad > 4) {
+            return null;
+        }
+        $candidatos = [];
+        foreach ($arr as $k => $v) {
+            if (is_numeric($v) && (float) $v >= 1 && (float) $v <= 9999999) {
+                $candidatos[] = (float) $v;
+            }
+            if (is_string($v) && preg_match('/^\$?[\d,]+\.?\d*$/', trim($v))) {
+                $n = $this->precioANumero($v);
+                if ($n !== null && $n >= 1 && $n <= 9999999) {
+                    $candidatos[] = $n;
+                }
+            }
+            if (is_array($v) && isset($v['value']) && is_numeric($v['value'])) {
+                $n = (float) $v['value'];
+                if ($n >= 1 && $n <= 9999999) {
+                    $candidatos[] = $n;
+                }
+            }
+            if (is_array($v)) {
+                $rec = $this->buscarPrecioEnArray($v, $preferirMenor, $profundidad + 1);
+                if ($rec !== null) {
+                    $candidatos[] = $rec;
+                }
+            }
+        }
+        if ($candidatos === []) {
+            return null;
+        }
+        return $preferirMenor ? min($candidatos) : max($candidatos);
     }
 
     private function precioANumero(mixed $valor): ?float

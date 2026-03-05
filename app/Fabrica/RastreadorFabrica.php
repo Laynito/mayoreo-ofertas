@@ -136,4 +136,16 @@ class RastreadorFabrica
 
         return $opciones ?: [];
     }
+
+    /**
+     * Nombre de tienda para BD a partir de la clase del motor (para EstadoMotorService).
+     *
+     * @param  class-string  $clase
+     */
+    public static function nombreTiendaDesdeClase(string $clase): ?string
+    {
+        $clave = array_search($clase, self::$motores, true);
+
+        return $clave !== false ? (self::nombresParaBD()[$clave] ?? null) : null;
+    }
 }

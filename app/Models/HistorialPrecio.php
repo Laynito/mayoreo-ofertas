@@ -6,6 +6,11 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
+/**
+ * Histórico de precios por producto (equivalente a "HistoricoPrecio").
+ * Cada cambio de precio del rastreo genera un registro aquí; se usa para detectar
+ * bajadas históricas (ej. ≥20% vs el registro anterior) y notificar con captura de pantalla.
+ */
 class HistorialPrecio extends Model
 {
     use HasFactory;

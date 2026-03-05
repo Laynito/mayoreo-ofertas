@@ -3,6 +3,8 @@
 namespace App\Motores;
 
 use App\Contratos\RastreadorTiendaInterface;
+use App\Fabrica\RastreadorFabrica;
+use App\Services\EstadoMotorService;
 use App\Support\HttpRastreador;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -33,13 +35,25 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
     abstract protected function extraerProductosDeRespuesta(string $body, string $urlPagina): array;
 
     /**
-     * Cabeceras de sesión que simulan Chrome en Windows 11 (visita humana).
-     * User-Agent moderno y Accept-Language es-MX para reducir bloqueos.
+     * User-Agent rotado (Chrome/Safari reales) para reducir bloqueos por tiendas que marcan scrapers.
+     */
+    protected function obtenerUserAgent(): string
+    {
+        $agents = config('rastreador.user_agents', []);
+        if ($agents === []) {
+            return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+        }
+
+        return (string) $agents[array_rand($agents)];
+    }
+
+    /**
+     * Cabeceras de sesión que simulan navegador real. User-Agent rotado para evitar baneos.
      */
     protected function obtenerCabecerasNavegador(string $refererBase): array
     {
         return [
-            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'User-Agent' => $this->obtenerUserAgent(),
             'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language' => 'es-MX,es;q=0.9',
             'Accept-Encoding' => 'gzip, deflate, br',
@@ -80,8 +94,8 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
     }
 
     /**
-     * Realiza una petición GET con el cliente Http de Laravel (pausa previa si corresponde).
-     * Proxy solo para texto (HTML/API); las URLs de imagen se piden con IP local. Manejo de excepciones y Log::warning.
+     * Realiza una petición GET con reintentos y exponential backoff (429, 503, timeout).
+     * Evita saturar servidores y reduce baneos permanentes.
      *
      * @return array{body: string, status: int}|null
      */
@@ -95,25 +109,52 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
             $cabeceras = array_merge($cabeceras, $opciones['headers']);
         }
 
-        $request = Http::withHeaders($cabeceras)->timeout(15)->connectTimeout(10);
-        $request = HttpRastreador::conProxySiTexto($request, $url);
+        $maxReintentos = config('rastreador.reintentos_maximos', 3);
+        $baseBackoff = config('rastreador.backoff_base_segundos', 2);
 
-        try {
-            $respuesta = $request->get($url);
-            $this->peticionesRealizadas++;
+        for ($intento = 0; $intento < $maxReintentos; $intento++) {
+            $request = Http::withHeaders($cabeceras)->timeout(15)->connectTimeout(10);
+            $request = HttpRastreador::conProxySiTexto($request, $url);
 
-            return [
-                'body' => $respuesta->body(),
-                'status' => $respuesta->status(),
-            ];
-        } catch (\Throwable $e) {
-            Log::warning(static::class . ': error en petición', [
-                'url' => $url,
-                'mensaje' => $e->getMessage(),
-            ]);
+            try {
+                $respuesta = $request->get($url);
+                $this->peticionesRealizadas++;
+                $status = $respuesta->status();
 
-            return null;
+                $reintentar = in_array($status, [429, 503], true);
+                if ($reintentar && $intento < $maxReintentos - 1) {
+                    $espera = (int) pow($baseBackoff, $intento + 1);
+                    Log::info(static::class . ': reintento con backoff', ['url' => $url, 'status' => $status, 'espera_s' => $espera]);
+                    sleep($espera);
+                    continue;
+                }
+
+                return [
+                    'body' => $respuesta->body(),
+                    'status' => $status,
+                ];
+            } catch (\Throwable $e) {
+                $mensaje = $e->getMessage();
+                $esTimeout = str_contains($mensaje, 'timeout') || str_contains($mensaje, 'timed out');
+                $reintentar = $esTimeout && $intento < $maxReintentos - 1;
+
+                if ($reintentar) {
+                    $espera = (int) pow($baseBackoff, $intento + 1);
+                    Log::info(static::class . ': reintento por timeout', ['url' => $url, 'espera_s' => $espera]);
+                    sleep($espera);
+                    continue;
+                }
+
+                Log::warning(static::class . ': error en petición', [
+                    'url' => $url,
+                    'mensaje' => $mensaje,
+                ]);
+
+                return null;
+            }
         }
+
+        return null;
     }
 
     /**
@@ -139,9 +180,28 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
                 'url' => $url,
                 'status' => $resultado['status'],
             ]);
+            $this->registrarFalloSiBloqueo($resultado['status'], $resultado['body']);
+        } elseif (str_contains($resultado['body'], 'Verifica tu identidad')) {
+            $this->registrarFalloSiBloqueo(403, $resultado['body']);
         }
 
         // Siempre pasar body y URL al motor: si es 403 u otro, puede registrar la respuesta para diagnóstico.
         return $this->extraerProductosDeRespuesta($resultado['body'], $url);
+    }
+
+    /**
+     * Registra fallo y marca motor como bloqueado si la respuesta indica 403 o captcha (para panel Filament).
+     */
+    protected function registrarFalloSiBloqueo(int $status, string $body): void
+    {
+        $nombreTienda = RastreadorFabrica::nombreTiendaDesdeClase(static::class);
+        if ($nombreTienda === null) {
+            return;
+        }
+        $mensaje = $status > 0 ? "HTTP {$status}" : 'Sin respuesta';
+        if (str_contains($body, 'Verifica tu identidad')) {
+            $mensaje .= '; Verifica tu identidad (bloqueo)';
+        }
+        app(EstadoMotorService::class)->registrarFallo($nombreTienda, $mensaje, $status);
     }
 }
