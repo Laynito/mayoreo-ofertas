@@ -2,13 +2,18 @@
 
 namespace App\Motores;
 
+use App\Support\HttpRastreador;
 use DOMDocument;
 use DOMXPath;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Motor de rastreo para Elektra México.
- * Elektra usa VTEX: prioriza el objeto __STATE__ en el HTML; si no hay, extrae por DOM (.vtex-product-summary-2-x-container).
+ * Motor de rastreo para Elektra México (VTEX).
+ * Mismo ADN que Coppel: cabeceras de navegador Chrome y gestión de sesión (cookie de código postal).
+ * Proxy solo para texto (HTML/API); las imágenes se piden con IP local.
+ * Orden: 1) API catalog_system/pub/products/search (ofertas/descuento), 2) HTML /ofertas + __STATE__, 3) ruta alternativa.
+ * Respeta permite_descuento_adicional (aplicado en RastreoTiendaComando al encolar).
  */
 class ElektraMotor extends BaseMotorRastreador
 {
@@ -19,6 +24,12 @@ class ElektraMotor extends BaseMotorRastreador
     /** Ruta alternativa si /ofertas está bloqueada (ej. categoría telefonia/celulares). */
     protected const RUTA_ALTERNATIVA = 'telefonia/celulares';
 
+    /** Endpoints VTEX para intentar ofertas (discount / price_promotion). */
+    private const API_OFERTAS_CANDIDATOS = [
+        '/api/catalog_system/pub/products/search?_from=0&_to=49&ft=ofertas',
+        '/api/catalog_system/pub/products/search?_from=0&_to=49',
+    ];
+
     protected function getUrlBase(): string
     {
         return self::URL_BASE;
@@ -27,11 +38,6 @@ class ElektraMotor extends BaseMotorRastreador
     protected function getRutaOfertas(): string
     {
         return self::RUTA_OFERTAS;
-    }
-
-    protected function getClaveConfigProxy(): ?string
-    {
-        return 'elektra';
     }
 
     /**
@@ -44,28 +50,25 @@ class ElektraMotor extends BaseMotorRastreador
     }
 
     /**
-     * Envía cookie de localización (vtex_segment y location) con el código postal para obtener precios correctos.
+     * Cabeceras y sesión mismo ADN que Coppel: Chrome + cookie de localización VTEX.
+     * Para peticiones a /api/ añade Accept: application/json.
      *
      * @return array<string, mixed>
      */
     protected function getOpcionesPeticion(string $url): array
     {
         $cp = $this->getCodigoPostal();
-        Log::info('ElektraMotor: código postal usado para cookie de localización', [
-            'codigo_postal' => $cp,
-        ]);
-        $valor = $cp;
-        $cookie = 'vtex_segment=' . $valor . '; location=' . $valor;
+        $cookie = 'vtex_segment=' . $cp . '; location=' . $cp;
+        $headers = ['Cookie' => $cookie];
+        if (str_contains($url, '/api/')) {
+            $headers['Accept'] = 'application/json';
+        }
 
-        return [
-            'headers' => [
-                'Cookie' => $cookie,
-            ],
-        ];
+        return ['headers' => $headers];
     }
 
     /**
-     * Primero intenta /ofertas; si no hay productos (bloqueo o Acceso Denegado), intenta categoría específica (telefonia/celulares).
+     * Recolecta: primero API de ofertas (VTEX catalog search); si no hay datos, HTML /ofertas y __STATE__; luego ruta alternativa.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -74,46 +77,163 @@ class ElektraMotor extends BaseMotorRastreador
         $this->peticionesRealizadas = 0;
         $base = rtrim($this->getUrlBase(), '/');
 
-        // Primera petición: página de ofertas
+        $productos = $this->recolectarDesdeApi($base);
+        if ($productos !== []) {
+            Log::info('ElektraMotor: productos obtenidos vía API catalog', ['cantidad' => count($productos)]);
+
+            return $productos;
+        }
+
         $urlOfertas = $base . '/' . ltrim($this->getRutaOfertas(), '/');
         $resultado = $this->realizarPeticion($urlOfertas);
 
-        if ($resultado !== null) {
-            if ($resultado['status'] !== 200) {
-                Log::info(static::class . ': respuesta no 200 en ofertas', [
-                    'url' => $urlOfertas,
-                    'status' => $resultado['status'],
-                ]);
-            }
+        if ($resultado !== null && $resultado['status'] === 200) {
             $productos = $this->extraerProductosDeRespuesta($resultado['body'], $urlOfertas);
             if ($productos !== []) {
                 return $productos;
             }
-        } else {
-            Log::info(static::class . ': sin respuesta en ofertas (timeout o excepción)', ['url' => $urlOfertas]);
         }
 
-        // Segunda petición: categoría específica (ej. telefonia/celulares) por si /ofertas está bloqueada
         $urlCategoria = $base . '/' . ltrim(self::RUTA_ALTERNATIVA, '/');
-        Log::info('ElektraMotor: intentando ruta alternativa (sin productos en ofertas)', [
-            'url_alternativa' => $urlCategoria,
-        ]);
+        Log::info('ElektraMotor: intentando ruta alternativa (sin productos en ofertas)', ['url_alternativa' => $urlCategoria]);
         $resultadoAlt = $this->realizarPeticion($urlCategoria);
 
-        if ($resultadoAlt === null) {
-            Log::info(static::class . ': sin respuesta en ruta alternativa', ['url' => $urlCategoria]);
-
+        if ($resultadoAlt === null || $resultadoAlt['status'] !== 200) {
             return [];
         }
 
-        if ($resultadoAlt['status'] !== 200) {
-            Log::info(static::class . ': respuesta no 200 en ruta alternativa', [
-                'url' => $urlCategoria,
-                'status' => $resultadoAlt['status'],
-            ]);
+        return $this->extraerProductosDeRespuesta($resultadoAlt['body'], $urlCategoria);
+    }
+
+    /**
+     * Intenta obtener ofertas desde la API VTEX (catalog_system pub products search).
+     * Filtra productos con discount o price_promotion (ListPrice > Price).
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function recolectarDesdeApi(string $base): array
+    {
+        $cabeceras = $this->obtenerCabecerasNavegador($base);
+        $opciones = $this->getOpcionesPeticion($base . '/api/catalog_system/pub/products/search');
+        if (isset($opciones['headers']) && is_array($opciones['headers'])) {
+            $cabeceras = array_merge($cabeceras, $opciones['headers']);
         }
 
-        return $this->extraerProductosDeRespuesta($resultadoAlt['body'], $urlCategoria);
+        foreach (self::API_OFERTAS_CANDIDATOS as $ruta) {
+            $url = $base . $ruta;
+            $this->pausarEntrePeticiones();
+            $request = Http::withHeaders($cabeceras)->timeout(12)->connectTimeout(10);
+            $request = HttpRastreador::conProxySiTexto($request, $url);
+
+            try {
+                $respuesta = $request->get($url);
+                $this->peticionesRealizadas++;
+            } catch (\Throwable $e) {
+                Log::debug('ElektraMotor: API no disponible', ['url' => $url, 'mensaje' => $e->getMessage()]);
+                continue;
+            }
+
+            if (! $respuesta->successful()) {
+                continue;
+            }
+
+            $data = $respuesta->json();
+            if (! is_array($data)) {
+                continue;
+            }
+
+            $items = $data;
+            if (isset($data['products']) && is_array($data['products'])) {
+                $items = $data['products'];
+            } elseif (isset($data['data']) && is_array($data['data'])) {
+                $items = $data['data'];
+            }
+
+            $productos = $this->mapearDesdeApiCatalog($items);
+            if ($productos !== []) {
+                return $productos;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Mapea respuesta de /api/catalog_system/pub/products/search a nuestro formato.
+     * Prioriza productos con descuento (ListPrice > Price o price_promotion).
+     *
+     * @param  array<int, array<string, mixed>>  $items
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function mapearDesdeApiCatalog(array $items): array
+    {
+        $productos = [];
+        foreach (array_slice($items, 0, 50) as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $normalizado = $this->normalizarItemDesdeApiCatalog($item);
+            if ($normalizado !== null) {
+                $productos[] = $normalizado;
+            }
+        }
+
+        return $productos;
+    }
+
+    /**
+     * Normaliza un ítem de la API catalog VTEX (items[].sellers[].commertialOffer).
+     * Solo incluye productos con precio de oferta o descuento (ListPrice > Price).
+     *
+     * @param  array<string, mixed>  $item
+     * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
+     */
+    protected function normalizarItemDesdeApiCatalog(array $item): ?array
+    {
+        $nombre = (string) ($item['productName'] ?? $item['name'] ?? $item['title'] ?? '');
+        $productId = (string) ($item['productId'] ?? $item['id'] ?? '');
+        if ($nombre === '' && $productId === '') {
+            return null;
+        }
+
+        $precioOriginal = 0.0;
+        $precioOferta = 0.0;
+        $items = $item['items'] ?? [];
+        $primerItem = is_array($items) ? ($items[0] ?? []) : [];
+        $sellers = $primerItem['sellers'] ?? [];
+        $offer = (is_array($sellers) && isset($sellers[0])) ? ($sellers[0]['commertialOffer'] ?? $sellers[0]['commercialOffer'] ?? []) : [];
+
+        if (is_array($offer)) {
+            $precioOferta = (float) ($offer['Price'] ?? $offer['price'] ?? 0);
+            $precioOriginal = (float) ($offer['ListPrice'] ?? $offer['listPrice'] ?? $precioOferta);
+            if ($precioOriginal <= 0) {
+                $precioOriginal = $precioOferta;
+            }
+        }
+
+        if ($precioOferta <= 0 && $precioOriginal <= 0) {
+            return null;
+        }
+
+        $itemsArr = $item['items'] ?? [];
+        $primerItemImg = is_array($itemsArr) && isset($itemsArr[0]) ? $itemsArr[0] : [];
+        $imagenes = $primerItemImg['images'] ?? [];
+        $imagenUrl = (is_array($imagenes) && isset($imagenes[0])) ? ($imagenes[0]['imageUrl'] ?? $imagenes[0]['url'] ?? null) : null;
+        $imagenUrl = $imagenUrl ?? $item['image'] ?? $item['thumbnail'] ?? null;
+        if (is_array($imagenUrl)) {
+            $imagenUrl = $imagenUrl['url'] ?? $imagenUrl[0] ?? null;
+        }
+        $link = $item['link'] ?? $item['url'] ?? $item['linkText'] ?? '';
+        $urlOriginal = is_string($link) && $link !== '' && str_starts_with($link, 'http') ? $link : self::URL_BASE . '/' . ltrim((string) $link, '/');
+
+        return [
+            'sku_tienda' => 'ELE-' . ($productId ?: substr(md5($nombre), 0, 12)),
+            'nombre' => $nombre ?: 'Producto Elektra',
+            'precio_original' => round($precioOriginal, 2),
+            'precio_oferta' => $precioOferta > 0 ? round($precioOferta, 2) : null,
+            'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
+            'url_original' => $urlOriginal ?: null,
+        ];
     }
 
     /**
@@ -125,13 +245,6 @@ class ElektraMotor extends BaseMotorRastreador
     protected function extraerProductosDeRespuesta(string $body, string $urlPagina): array
     {
         $productos = [];
-
-        // Diagnóstico: primeros 1000 caracteres del HTML para ver si es "Acceso Denegado" o cambió __STATE__.
-        Log::info('ElektraMotor: inicio de respuesta HTML (diagnóstico)', [
-            'url' => $urlPagina,
-            'longitud_total' => strlen($body),
-            'primeros_1000_caracteres' => mb_substr($body, 0, 1000),
-        ]);
 
         // Elektra usa VTEX: buscar __STATE__ (JSON gigante con productos).
         if (preg_match('/__STATE__\s*=\s*(\{.+\})\s*;?\s*<\/script>/s', $body, $coincidencias)) {

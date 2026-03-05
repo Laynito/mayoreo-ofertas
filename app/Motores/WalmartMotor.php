@@ -2,12 +2,14 @@
 
 namespace App\Motores;
 
+use App\Support\HttpRastreador;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Walmart México.
- * Usa BaseMotorRastreador: configurarCliente() con Guzzle, Chrome 131, config('services.walmart.proxy').
- * Extracción inteligente: solo scripts JSON (__NEXT_DATA__, __PRELOADED_STATE__), sin HTML puro (más estable).
+ * Intenta primero endpoint interno de Deals (API); fallback: búsqueda "ofertas" y extracción desde __NEXT_DATA__/__PRELOADED_STATE__.
+ * Respeta permite_descuento_adicional (aplicado en RastreoTiendaComando al encolar).
  */
 class WalmartMotor extends BaseMotorRastreador
 {
@@ -15,6 +17,12 @@ class WalmartMotor extends BaseMotorRastreador
 
     /** Ruta más robusta: búsqueda "ofertas" (evita 404 de /super/ofertas). */
     protected const RUTA_OFERTAS = 'search?q=ofertas';
+
+    /** Posibles rutas de API interna para Deals (probar en orden). */
+    private const API_DEALS_CANDIDATOS = [
+        '/api/deals',
+        '/super/ofertas',
+    ];
 
     protected function getUrlBase(): string
     {
@@ -27,11 +35,53 @@ class WalmartMotor extends BaseMotorRastreador
     }
 
     /**
-     * Proxy: config('services.walmart.proxy') o env('WALMART_HTTP_PROXY').
+     * Recolecta: primero intenta API/Deals; si no hay datos, usa búsqueda HTML + extracción JSON.
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
-    protected function getClaveConfigProxy(): ?string
+    public function recolectarDatos(): array
     {
-        return 'walmart';
+        $productos = $this->recolectarDesdeApiDeals();
+        if (! empty($productos)) {
+            Log::info('WalmartMotor: productos obtenidos vía API Deals', ['cantidad' => count($productos)]);
+            return $productos;
+        }
+
+        return parent::recolectarDatos();
+    }
+
+    /**
+     * Intenta obtener ofertas desde endpoint(s) de Deals. Si la API devuelve JSON con ítems, los mapea.
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function recolectarDesdeApiDeals(): array
+    {
+        $cabeceras = [
+            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept' => 'application/json',
+            'Accept-Language' => 'es-MX,es;q=0.9',
+            'Referer' => self::URL_BASE . '/',
+        ];
+
+        foreach (self::API_DEALS_CANDIDATOS as $ruta) {
+            $url = rtrim(self::URL_BASE, '/') . $ruta;
+            $request = Http::withHeaders($cabeceras)->timeout(12);
+            $respuesta = HttpRastreador::conProxySiTexto($request, $url)->get($url);
+            if (! $respuesta->successful()) {
+                continue;
+            }
+            $cuerpo = $respuesta->body();
+            if (str_starts_with(trim($cuerpo), '{') || str_starts_with(trim($cuerpo), '[')) {
+                $data = $respuesta->json();
+                $items = $data['items'] ?? $data['products'] ?? $data['results'] ?? $data['itemStacks'][0]['items'] ?? (is_array($data) ? $data : []);
+                if (is_array($items) && ! empty($items)) {
+                    return $this->mapearItems($items);
+                }
+            }
+        }
+
+        return [];
     }
 
     /**

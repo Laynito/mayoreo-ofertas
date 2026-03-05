@@ -3,6 +3,7 @@
 namespace App\Fabrica;
 
 use App\Contratos\RastreadorTiendaInterface;
+use App\Motores\AliExpressMotor;
 use App\Motores\AmazonMexicoMotor;
 use App\Motores\BodegaAurreraMotor;
 use App\Motores\CalimaxMotor;
@@ -12,6 +13,7 @@ use App\Motores\CostcoMotor;
 use App\Motores\ElektraMotor;
 use App\Motores\LiverpoolMotor;
 use App\Motores\MercadoLibreMotor;
+use App\Motores\OfficeDepotMotor;
 use App\Motores\SamsClubMotor;
 use App\Motores\SorianaMotor;
 use App\Motores\WalmartMotor;
@@ -40,6 +42,8 @@ class RastreadorFabrica
         'soriana' => SorianaMotor::class,
         'costco' => CostcoMotor::class,
         'sams club' => SamsClubMotor::class,
+        'aliexpress' => AliExpressMotor::class,
+        'office depot' => OfficeDepotMotor::class,
     ];
 
     /**
@@ -89,7 +93,19 @@ class RastreadorFabrica
     public static function nombreParaBD(string $tienda): string
     {
         $clave = self::normalizarClave($tienda);
-        $nombres = [
+        $nombres = self::nombresParaBD();
+
+        return $nombres[$clave] ?? mb_strtoupper(mb_substr($tienda, 0, 1)) . mb_strtolower(mb_substr(trim($tienda), 1));
+    }
+
+    /**
+     * Lista de tiendas para menús y filtros (clave normalizada => nombre para BD).
+     *
+     * @return array<string, string>
+     */
+    public static function nombresParaBD(): array
+    {
+        return [
             'walmart' => 'Walmart',
             'amazon' => 'Amazon',
             'mercado libre' => 'Mercado Libre',
@@ -102,8 +118,22 @@ class RastreadorFabrica
             'soriana' => 'Soriana',
             'costco' => 'Costco',
             'sams club' => 'Sams Club',
+            'aliexpress' => 'AliExpress',
+            'office depot' => 'Office Depot',
         ];
+    }
 
-        return $nombres[$clave] ?? mb_strtoupper(mb_substr($tienda, 0, 1)) . mb_strtolower(mb_substr(trim($tienda), 1));
+    /**
+     * Nombres de tienda para pestañas y select (valor => etiqueta). Incluye "Otro" para productos manuales.
+     *
+     * @return array<string, string>
+     */
+    public static function tiendasParaMenu(): array
+    {
+        $lista = array_values(self::nombresParaBD());
+        $opciones = array_combine($lista, $lista);
+        $opciones['Otro'] = 'Otro';
+
+        return $opciones ?: [];
     }
 }

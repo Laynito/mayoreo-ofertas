@@ -3,18 +3,16 @@
 namespace App\Motores;
 
 use App\Contratos\RastreadorTiendaInterface;
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\GuzzleException;
+use App\Support\HttpRastreador;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Clase base para motores de rastreo con Guzzle (cabeceras de navegador, pausas, proxy).
- * Toda la lógica de scraping HTTP vive aquí; los motores concretos definen URL y extracción.
+ * Clase base para motores de rastreo con el cliente Http de Laravel (cabeceras de navegador, pausas).
+ * Proxy global: si PROXY_URL está definida en .env, todo el tráfico pasa por ahí; si no, tráfico directo.
  */
 abstract class BaseMotorRastreador implements RastreadorTiendaInterface
 {
-    protected ?Client $cliente = null;
-
     protected int $peticionesRealizadas = 0;
 
     /**
@@ -28,50 +26,11 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
     abstract protected function getRutaOfertas(): string;
 
     /**
-     * Clave para config('services.{clave}.proxy'). Override en motor si aplica.
-     */
-    protected function getClaveConfigProxy(): ?string
-    {
-        return null;
-    }
-
-    /**
      * Extrae productos del cuerpo de la respuesta (HTML/JSON). Implementación por tienda.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     abstract protected function extraerProductosDeRespuesta(string $body, string $urlPagina): array;
-
-    /**
-     * Configura el cliente Guzzle con cabeceras de Chrome (Windows 11), allow_redirects y proxy.
-     * Proxy: config('services.{clave}.proxy'), ej. config('services.walmart.proxy').
-     */
-    protected function configurarCliente(): Client
-    {
-        if ($this->cliente !== null) {
-            return $this->cliente;
-        }
-
-        $urlBase = $this->getUrlBase();
-        $opciones = [
-            'timeout' => 15,
-            'connect_timeout' => 10,
-            'allow_redirects' => true,
-            'headers' => $this->obtenerCabecerasNavegador($urlBase),
-        ];
-
-        $clave = $this->getClaveConfigProxy();
-        if ($clave !== null) {
-            $proxy = config("services.{$clave}.proxy");
-            if (! empty($proxy)) {
-                $opciones['proxy'] = $proxy;
-            }
-        }
-
-        $this->cliente = new Client($opciones);
-
-        return $this->cliente;
-    }
 
     /**
      * Cabeceras de sesión que simulan Chrome en Windows 11 (visita humana).
@@ -121,7 +80,8 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
     }
 
     /**
-     * Realiza una petición GET (pausa previa si corresponde). Manejo de excepciones y Log::warning.
+     * Realiza una petición GET con el cliente Http de Laravel (pausa previa si corresponde).
+     * Proxy solo para texto (HTML/API); las URLs de imagen se piden con IP local. Manejo de excepciones y Log::warning.
      *
      * @return array{body: string, status: int}|null
      */
@@ -129,16 +89,24 @@ abstract class BaseMotorRastreador implements RastreadorTiendaInterface
     {
         $this->pausarEntrePeticiones();
 
+        $cabeceras = $this->obtenerCabecerasNavegador($this->getUrlBase());
+        $opciones = $this->getOpcionesPeticion($url);
+        if (isset($opciones['headers']) && is_array($opciones['headers'])) {
+            $cabeceras = array_merge($cabeceras, $opciones['headers']);
+        }
+
+        $request = Http::withHeaders($cabeceras)->timeout(15)->connectTimeout(10);
+        $request = HttpRastreador::conProxySiTexto($request, $url);
+
         try {
-            $opciones = $this->getOpcionesPeticion($url);
-            $respuesta = $this->configurarCliente()->request('GET', $url, $opciones);
+            $respuesta = $request->get($url);
             $this->peticionesRealizadas++;
 
             return [
-                'body' => (string) $respuesta->getBody(),
-                'status' => $respuesta->getStatusCode(),
+                'body' => $respuesta->body(),
+                'status' => $respuesta->status(),
             ];
-        } catch (GuzzleException $e) {
+        } catch (\Throwable $e) {
             Log::warning(static::class . ': error en petición', [
                 'url' => $url,
                 'mensaje' => $e->getMessage(),

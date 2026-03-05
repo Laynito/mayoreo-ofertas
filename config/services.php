@@ -49,9 +49,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Proxies por tienda (rastreo)
+    | Proxy global (rastreo)
     |--------------------------------------------------------------------------
-    | Cada motor lee config('services.{clave}.proxy'). Ejemplo: http://user:pass@host:8080
+    | PROXY_URL: si está vacío, todo el tráfico va directo; si tiene URL, todo pasa por ahí.
+    | Útil para gastar en proxy solo cuando una tienda bloquee. Ejemplo: http://user:pass@host:8080
+    */
+    'proxy_url' => env('PROXY_URL'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Proxies por tienda (rastreo) – legacy; preferir PROXY_URL para todo
+    |--------------------------------------------------------------------------
     */
     'walmart' => [
         'proxy' => env('WALMART_HTTP_PROXY'),
@@ -89,6 +97,12 @@ return [
     ],
     'calimax' => [
         'proxy' => env('CALIMAX_HTTP_PROXY'),
+    ],
+    'aliexpress' => [
+        'proxy' => env('ALIEXPRESS_HTTP_PROXY'),
+    ],
+    'office_depot' => [
+        'proxy' => env('OFFICE_DEPOT_HTTP_PROXY'),
     ],
 
 ];

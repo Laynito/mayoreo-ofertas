@@ -2,22 +2,26 @@
 
 namespace App\Motores;
 
-use GuzzleHttp\Client;
+use App\Support\HttpRastreador;
 use GuzzleHttp\Cookie\CookieJar;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Sam's Club México.
- * Usa Guzzle vía BaseMotorRastreador. Pide primero la Home (/) para obtener cookies de sesión.
+ * Estrategia: consumo de API interna (showcase) en lugar de HTML que depende de JS.
  */
 class SamsClubMotor extends BaseMotorRastreador
 {
     protected const URL_BASE = 'https://www.sams.com.mx';
 
-    /** Búsqueda por palabra "ofertas" (evita 404 por catid obsoleto). */
-    protected const RUTA_OFERTAS = 's/ofertas';
+    /** API de búsqueda rápida (JSON). */
+    protected const API_SHOWCASE = '/api/v1/search/showcase';
 
-    /** Rebajas sin ID de categoría por si la búsqueda falla. */
+    /** Búsqueda directa de rebajas (fallback si la API no devuelve datos). */
+    protected const RUTA_OFERTAS = 's/rebajas';
+
+    /** Ofertas exclusivas sin ID final por si rebajas falla. */
     protected const RUTA_OFERTAS_ALT = 'c/ofertas-exclusivas';
 
     protected ?CookieJar $cookieJar = null;
@@ -32,39 +36,69 @@ class SamsClubMotor extends BaseMotorRastreador
         return self::RUTA_OFERTAS;
     }
 
-    protected function getClaveConfigProxy(): ?string
-    {
-        return 'sams_club';
-    }
-
     /**
-     * Cliente con CookieJar para persistir cookies de la Home y enviarlas en ofertas.
+     * Para peticiones a la API se añaden headers de validación (evitar bloqueo/Captcha).
+     *
+     * @return array<string, mixed>
      */
-    protected function configurarCliente(): Client
+    protected function getOpcionesPeticion(string $url): array
     {
-        if ($this->cliente !== null) {
-            return $this->cliente;
+        if (! str_contains($url, '/api/')) {
+            return [];
         }
-        $this->cookieJar = new CookieJar;
-        $urlBase = $this->getUrlBase();
-        $opciones = [
-            'timeout' => 15,
-            'connect_timeout' => 10,
-            'allow_redirects' => true,
-            'cookies' => $this->cookieJar,
-            'headers' => $this->obtenerCabecerasNavegador($urlBase),
+        return [
+            'headers' => [
+                'Accept' => 'application/json',
+                'Content-Type' => 'application/json',
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
+                'X-Requested-With' => 'XMLHttpRequest',
+                'Origin' => 'https://www.sams.com.mx',
+            ],
         ];
-        $proxy = config('services.sams_club.proxy');
-        if (! empty($proxy)) {
-            $opciones['proxy'] = $proxy;
-        }
-        $this->cliente = new Client($opciones);
-        return $this->cliente;
     }
 
     /**
-     * Primero pide la Home (/) para obtener cookies; luego la página de ofertas.
-     * Si la URL principal no devuelve productos, prueba la URL alternativa.
+     * Peticiones con CookieJar para persistir sesión (Home + ofertas). Usa Http de Laravel y PROXY_URL si está definida.
+     *
+     * @return array{body: string, status: int}|null
+     */
+    protected function realizarPeticion(string $url): ?array
+    {
+        $this->pausarEntrePeticiones();
+
+        if ($this->cookieJar === null) {
+            $this->cookieJar = new CookieJar;
+        }
+
+        $cabeceras = $this->obtenerCabecerasNavegador($this->getUrlBase());
+        $opciones = $this->getOpcionesPeticion($url);
+        if (isset($opciones['headers']) && is_array($opciones['headers'])) {
+            $cabeceras = array_merge($cabeceras, $opciones['headers']);
+        }
+
+        $request = Http::withHeaders($cabeceras)
+            ->withOptions(['cookies' => $this->cookieJar])
+            ->timeout(15)
+            ->connectTimeout(10);
+        $request = HttpRastreador::conProxySiTexto($request, $url);
+
+        try {
+            $respuesta = $request->get($url);
+            $this->peticionesRealizadas++;
+
+            return [
+                'body' => $respuesta->body(),
+                'status' => $respuesta->status(),
+            ];
+        } catch (\Throwable $e) {
+            Log::warning(static::class . ': error en petición', ['url' => $url, 'mensaje' => $e->getMessage()]);
+
+            return null;
+        }
+    }
+
+    /**
+     * Primero intenta la API de búsqueda showcase (JSON); si falla o no hay datos, fallback a HTML.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -72,12 +106,31 @@ class SamsClubMotor extends BaseMotorRastreador
     {
         $this->peticionesRealizadas = 0;
         $base = rtrim($this->getUrlBase(), '/');
-        $this->configurarCliente();
 
         $homeUrl = $base . '/';
-        $resultadoHome = $this->realizarPeticion($homeUrl);
-        if ($resultadoHome === null) {
-            Log::info(static::class . ': fallo petición a Home', ['url' => $homeUrl]);
+        $this->realizarPeticion($homeUrl);
+
+        $urlApi = $base . self::API_SHOWCASE . '?searchString=ofertas';
+        $resultadoApi = $this->realizarPeticion($urlApi);
+
+        if ($resultadoApi !== null && ($resultadoApi['status'] === 401 || $resultadoApi['status'] === 403)) {
+            Log::error('API Bloqueada', ['cuerpo' => $resultadoApi['body'], 'url' => $urlApi, 'status' => $resultadoApi['status']]);
+        }
+
+        if ($resultadoApi !== null && $resultadoApi['status'] === 200) {
+            $body = $resultadoApi['body'];
+            $data = json_decode($body, true);
+            if (! is_array($data) && $body !== '') {
+                Log::warning('SamsClubMotor: respuesta API no es JSON (posible Captcha).', [
+                    'inicio_respuesta' => mb_substr($body, 0, 500),
+                    'url' => $urlApi,
+                ]);
+            }
+            $productos = $this->extraerDesdeApiShowcase($body);
+            if (! empty($productos)) {
+                Log::info(static::class . ': productos obtenidos vía API showcase', ['total' => count($productos)]);
+                return $productos;
+            }
         }
 
         $urlOfertas = $base . '/' . ltrim($this->getRutaOfertas(), '/');
@@ -105,6 +158,88 @@ class SamsClubMotor extends BaseMotorRastreador
             $this->registrarRespuestaParaDebug($resultado['body'], $urlOfertas, $resultado['status']);
         }
         return $productos;
+    }
+
+    /**
+     * Extrae productos del JSON de la API showcase (searchString=ofertas).
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function extraerDesdeApiShowcase(string $body): array
+    {
+        $data = json_decode($body, true);
+        if (! is_array($data)) {
+            return [];
+        }
+        $items = $data['products'] ?? $data['items'] ?? $data['results'] ?? $data['data'] ?? $data['productSummaries'] ?? [];
+        if (! is_array($items)) {
+            return [];
+        }
+        $productos = [];
+        foreach (array_slice($items, 0, 50) as $item) {
+            $m = $this->normalizarItemApiShowcase($item);
+            if ($m !== null) {
+                $productos[] = $m;
+            }
+        }
+        return $productos;
+    }
+
+    /**
+     * Mapea un ítem de la API showcase al formato interno.
+     *
+     * @param  array<string, mixed>  $item
+     * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
+     */
+    protected function normalizarItemApiShowcase(array $item): ?array
+    {
+        $nombre = (string) ($item['productName'] ?? $item['name'] ?? $item['title'] ?? $item['displayName'] ?? '');
+        if ($nombre === '') {
+            return null;
+        }
+        $sku = (string) ($item['sku'] ?? $item['productId'] ?? $item['id'] ?? $item['itemId'] ?? '');
+        $skuTienda = 'SAM-' . ($sku ?: substr(md5($nombre), 0, 12));
+
+        $precioOferta = (float) ($item['price'] ?? $item['salePrice'] ?? $item['currentPrice'] ?? 0);
+        $precioOriginal = (float) ($item['listPrice'] ?? $item['regularPrice'] ?? $item['originalPrice'] ?? $precioOferta);
+        if ($precioOriginal <= 0) {
+            $precioOriginal = $precioOferta;
+        }
+        if ($precioOferta <= 0 && $precioOriginal <= 0) {
+            return null;
+        }
+
+        $imagenUrl = $item['image'] ?? $item['imageUrl'] ?? $item['thumbnail'] ?? null;
+        if (is_array($imagenUrl)) {
+            $imagenUrl = $imagenUrl['url'] ?? $imagenUrl[0] ?? null;
+        }
+        $urlOriginal = $this->normalizarUrlPublicaSams($item['url'] ?? $item['link'] ?? $item['productUrl'] ?? null);
+
+        return [
+            'sku_tienda' => $skuTienda,
+            'nombre' => $nombre ?: 'Producto Sam\'s Club',
+            'precio_original' => round($precioOriginal, 2),
+            'precio_oferta' => $precioOferta > 0 && $precioOferta < $precioOriginal ? round($precioOferta, 2) : null,
+            'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
+            'url_original' => $urlOriginal,
+        ];
+    }
+
+    /**
+     * Asegura que la URL apunte a la tienda pública (sams.com.mx), no a APIs internas.
+     */
+    protected function normalizarUrlPublicaSams(?string $url): ?string
+    {
+        if ($url === null || $url === '') {
+            return null;
+        }
+        if (str_contains($url, '/api/') || str_contains($url, 'myvtex.com')) {
+            return null;
+        }
+        if (! str_starts_with($url, 'http')) {
+            $url = self::URL_BASE . '/' . ltrim($url, '/');
+        }
+        return str_starts_with($url, 'https://www.sams.com.mx') ? $url : null;
     }
 
     /**
@@ -187,10 +322,7 @@ class SamsClubMotor extends BaseMotorRastreador
         if (is_array($imagenUrl)) {
             $imagenUrl = $imagenUrl['url'] ?? $imagenUrl[0] ?? null;
         }
-        $urlOriginal = $item['url'] ?? $item['link'] ?? null;
-        if (is_string($urlOriginal) && ! str_starts_with($urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim($urlOriginal, '/');
-        }
+        $urlOriginal = $this->normalizarUrlPublicaSams($item['url'] ?? $item['link'] ?? null);
 
         return [
             'sku_tienda' => $skuTienda,
@@ -198,7 +330,7 @@ class SamsClubMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta > 0 ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal,
         ];
     }
 }

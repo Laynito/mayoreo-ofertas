@@ -33,6 +33,8 @@ class TablaOfertasPublica extends Component
     public function render()
     {
         $productos = Producto::query()
+            ->whereNotNull('precio_oferta')
+            ->whereColumn('precio_oferta', '<', 'precio_original')
             ->when($this->busqueda !== '', function ($q) {
                 $q->where(function ($q) {
                     $q->where('nombre', 'like', '%' . $this->busqueda . '%')

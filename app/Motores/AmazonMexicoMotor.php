@@ -2,20 +2,24 @@
 
 namespace App\Motores;
 
+use App\Support\HttpRastreador;
 use DOMDocument;
 use DOMXPath;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Amazon México.
- * Extracción real vía DOM (selectores robustos: data-asin, .a-offscreen, enlaces /dp/).
+ * Enfocado solo en Ofertas del Día (Gold Box): amazon.com.mx/gp/goldbox.
+ * Proxy Inteligente: cuando PROXY_URL está definida, todo el tráfico de este motor pasa por el proxy.
+ * Si el precio baja más de 25%, el Job se encola con prioridad alta y sin delay (RastreoTiendaComando).
  */
 class AmazonMexicoMotor extends BaseMotorRastreador
 {
     protected const URL_BASE = 'https://www.amazon.com.mx';
 
-    /** Página de ofertas (Today's Deals). */
-    protected const RUTA_OFERTAS = 'gp/deals';
+    /** Ofertas del día (Gold Box). */
+    protected const RUTA_OFERTAS = 'gp/goldbox';
 
     protected function getUrlBase(): string
     {
@@ -27,25 +31,62 @@ class AmazonMexicoMotor extends BaseMotorRastreador
         return self::RUTA_OFERTAS;
     }
 
-    protected function getClaveConfigProxy(): ?string
+    /**
+     * Cabeceras que simulan Chrome para evitar bloqueos.
+     *
+     * @return array<string, string>
+     */
+    protected function cabecerasChrome(): array
     {
-        return 'amazon';
+        return [
+            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language' => 'es-MX,es;q=0.9',
+            'Accept-Encoding' => 'gzip, deflate, br',
+            'Referer' => self::URL_BASE . '/',
+            'Upgrade-Insecure-Requests' => '1',
+            'Sec-Fetch-Dest' => 'document',
+            'Sec-Fetch-Mode' => 'navigate',
+            'Sec-Fetch-Site' => 'none',
+            'Sec-Fetch-User' => '?1',
+            'Sec-Ch-Ua' => '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'Sec-Ch-Ua-Mobile' => '?0',
+            'Sec-Ch-Ua-Platform' => '"Windows"',
+            'Cache-Control' => 'max-age=0',
+            'Connection' => 'keep-alive',
+            'DNT' => '1',
+        ];
     }
 
     /**
-     * Recolecta datos; si en local no hay resultados, devuelve un producto de prueba para verificar log/BD.
+     * Recolecta datos desde Gold Box usando Laravel Http con cabeceras Chrome.
+     * Respeta permite_descuento_adicional (aplicado en RastreoTiendaComando al encolar).
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     public function recolectarDatos(): array
     {
-        $productos = parent::recolectarDatos();
-        if (empty($productos) && app()->environment('local')) {
-            Log::info('AmazonMexicoMotor: sin datos de extracción; usando producto de prueba para verificación.');
-            return [ $this->productoDePrueba() ];
+        $url = rtrim(self::URL_BASE, '/') . '/' . ltrim(self::RUTA_OFERTAS, '/');
+
+        $request = Http::withHeaders($this->cabecerasChrome())
+            ->timeout(15)
+            ->connectTimeout(10)
+            ->withOptions(['verify' => true]);
+        $respuesta = HttpRastreador::conProxy($request)->get($url);
+
+        if (! $respuesta->successful()) {
+            Log::info('AmazonMexicoMotor: respuesta no exitosa', ['url' => $url, 'status' => $respuesta->status()]);
+            return [];
         }
 
-        return $productos;
+        $productos = $this->extraerProductosDeRespuesta($respuesta->body(), $url);
+
+        if (empty($productos) && app()->environment('local')) {
+            Log::info('AmazonMexicoMotor: sin datos de extracción; usando producto de prueba para verificación.');
+            return [$this->productoDePrueba()];
+        }
+
+        return array_slice($productos, 0, 50);
     }
 
     /**

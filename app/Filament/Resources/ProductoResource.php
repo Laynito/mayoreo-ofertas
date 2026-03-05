@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources;
 
+use App\Fabrica\RastreadorFabrica;
 use App\Filament\Resources\ProductoResource\Pages;
 use App\Models\Producto;
 use Filament\Forms;
@@ -172,24 +173,11 @@ class ProductoResource extends Resource
     }
 
     /**
-     * Opciones de tienda (alineadas con RastreadorFabrica y motores).
+     * Opciones de tienda (todas las de RastreadorFabrica + Otro para productos manuales).
      */
     public static function opcionesTiendas(): array
     {
-        return [
-            'Walmart' => 'Walmart',
-            'Amazon' => 'Amazon',
-            'Liverpool' => 'Liverpool',
-            'Coppel' => 'Coppel',
-            'Mercado Libre' => 'Mercado Libre',
-            'Elektra' => 'Elektra',
-            'Bodega Aurrera' => 'Bodega Aurrera',
-            'Chedraui' => 'Chedraui',
-            'Soriana' => 'Soriana',
-            'Costco' => 'Costco',
-            'Sams Club' => 'Sams Club',
-            'Otro' => 'Otro',
-        ];
+        return RastreadorFabrica::tiendasParaMenu();
     }
 
     public static function getRelations(): array

@@ -62,11 +62,6 @@ class CoppelMotor extends BaseMotorRastreador
         return self::RUTA_OFERTAS;
     }
 
-    protected function getClaveConfigProxy(): ?string
-    {
-        return 'coppel';
-    }
-
     /**
      * Limita cuántos productos se recolectan (para pruebas rápidas con --max=10 o --max=20).
      */
@@ -132,13 +127,19 @@ class CoppelMotor extends BaseMotorRastreador
         $headers['Accept'] = 'text/x-component';
         $headers['RSC'] = '1';
 
-        $responses = Http::pool(function ($pool) use ($requests, $headers) {
+        $opciones = ['verify' => false];
+        $proxy = config('services.proxy_url');
+        if ($proxy !== null && $proxy !== '') {
+            $opciones['proxy'] = $proxy;
+        }
+
+        $responses = Http::pool(function ($pool) use ($requests, $headers, $opciones) {
             foreach ($requests as $key => $req) {
                 $pool->as($key)
                     ->withHeaders($headers)
                     ->timeout(5)
                     ->retry(2, 100)
-                    ->withOptions(['verify' => false])
+                    ->withOptions($opciones)
                     ->get($req['url']);
             }
         });

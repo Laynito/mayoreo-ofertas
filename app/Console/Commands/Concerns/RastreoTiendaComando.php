@@ -64,6 +64,17 @@ trait RastreoTiendaComando
             $this->info("Se tomaron los primeros {$max} productos.");
         }
 
+        if ($tiendaOrigen === 'Calimax') {
+            Producto::query()
+                ->where('tienda_origen', 'Calimax')
+                ->where(function ($q) {
+                    $q->where('url_original', 'like', '%myvtex%')
+                        ->orWhere('url_original', 'like', '%vtexcommercestable%')
+                        ->orWhere('url_original', 'like', '%portal.%');
+                })
+                ->update(['url_original' => null, 'url_afiliado' => null]);
+        }
+
         $skus = array_column($items, 'sku_tienda');
         $existing = Producto::query()
             ->where('tienda_origen', $tiendaOrigen)
@@ -76,35 +87,46 @@ trait RastreoTiendaComando
         $historialCandidates = [];
 
         foreach ($items as $item) {
-            $porcentajeAhorro = $this->calculadoraOfertas->calcularPorcentajeAhorro(
-                (float) $item['precio_original'],
-                $item['precio_oferta'] ?? null
-            );
+            $precioOriginal = (float) $item['precio_original'];
+            $precioOferta = isset($item['precio_oferta']) ? (float) $item['precio_oferta'] : null;
+            if ($precioOferta !== null && $precioOferta >= $precioOriginal) {
+                $precioOferta = null;
+            }
+            $porcentajeAhorro = $this->calculadoraOfertas->calcularPorcentajeAhorro($precioOriginal, $precioOferta);
+
             $exist = $existing->get($item['sku_tienda']);
             $precioOriginalAnterior = $exist?->precio_original;
             $precioOfertaAnterior = $exist?->precio_oferta;
             $precioCambio = $this->precioCambio(
                 $precioOriginalAnterior,
                 $precioOfertaAnterior,
-                $item['precio_original'],
-                $item['precio_oferta'] ?? null
+                $precioOriginal,
+                $precioOferta
             );
 
             $categoria = $item['categoria_origen'] ?? $exist?->categoria_origen;
             $permite = $exist?->permite_descuento_adicional ?? true;
+
+            $urlOriginal = $item['url_original'] ?? null;
+            if ($tiendaOrigen === 'Calimax' && is_string($urlOriginal) && $urlOriginal !== '') {
+                $urlLower = strtolower($urlOriginal);
+                if (str_contains($urlLower, 'myvtex.com') || str_contains($urlLower, 'vtexcommercestable.com.br') || str_contains($urlLower, 'portal.')) {
+                    $urlOriginal = null;
+                }
+            }
 
             $rows[] = [
                 'tienda_origen' => $tiendaOrigen,
                 'sku_tienda' => $item['sku_tienda'],
                 'nombre' => $item['nombre'],
                 'imagen_url' => $item['imagen_url'] ?? null,
-                'precio_original' => $item['precio_original'],
-                'precio_oferta' => $item['precio_oferta'] ?? null,
+                'precio_original' => $precioOriginal,
+                'precio_oferta' => $precioOferta,
                 'porcentaje_ahorro' => $porcentajeAhorro,
                 'stock_disponible' => $item['stock_disponible'] ?? $exist?->stock_disponible ?? 0,
                 'ultima_actualizacion_precio' => $now,
-                'url_original' => $item['url_original'] ?? null,
-                'url_afiliado' => $this->generarUrlAfiliado($item['url_original'] ?? ''),
+                'url_original' => $urlOriginal,
+                'url_afiliado' => $this->generarUrlAfiliado($urlOriginal ?? ''),
                 'categoria_origen' => $categoria,
                 'permite_descuento_adicional' => $permite,
                 'created_at' => $now,
@@ -114,8 +136,8 @@ trait RastreoTiendaComando
             if ($exist === null || $precioCambio) {
                 $historialCandidates[] = [
                     'sku_tienda' => $item['sku_tienda'],
-                    'precio_original' => $item['precio_original'],
-                    'precio_oferta' => $item['precio_oferta'] ?? null,
+                    'precio_original' => $precioOriginal,
+                    'precio_oferta' => $precioOferta,
                     'porcentaje_ahorro' => $porcentajeAhorro,
                 ];
             }
@@ -156,11 +178,18 @@ trait RastreoTiendaComando
         $porcentajeMinimo = Configuracion::porcentajeMinimoNotificacion();
         $requiereDescuentoAdicional = Configuracion::requiereDescuentoAdicional();
 
+        // Lógica de encolado:
+        // - Solo productos con descuento real (precio_oferta < precio_original).
+        // - Mercado Libre: solo notificar si el descuento calculado es mayor al 15%.
+        // - Si "Solo productos con descuento adicional" está activo, se excluyen permite_descuento_adicional = false.
+        // - Premium recibe todas las que pasen (0%+); Free según porcentaje mínimo.
         $query = Producto::query()
             ->where('tienda_origen', $tiendaOrigen)
             ->whereColumn('precio_oferta', '<', 'precio_original')
-            ->where('porcentaje_ahorro', '>=', $porcentajeMinimo)
             ->whereNotNull('precio_oferta');
+        if ($tiendaOrigen === 'Mercado Libre') {
+            $query->whereRaw('precio_original > 0 AND (1 - precio_oferta / precio_original) * 100 > 15');
+        }
         if ($requiereDescuentoAdicional) {
             $query->where('permite_descuento_adicional', true);
         }
@@ -177,19 +206,55 @@ trait RastreoTiendaComando
         }
 
         $productosParaTelegram = $query->get();
-        $encolados = 0;
+        $encolados = $productosParaTelegram->count();
+
+        $totalConDescuento = Producto::query()
+            ->where('tienda_origen', $tiendaOrigen)
+            ->whereColumn('precio_oferta', '<', 'precio_original')
+            ->whereNotNull('precio_oferta')
+            ->count();
+        if ($requiereDescuentoAdicional && $totalConDescuento > $encolados) {
+            $this->warn("Filtro activo: solo productos con 'permite descuento adicional'. Excluidos: " . ($totalConDescuento - $encolados) . " de {$totalConDescuento}. Desactívalo en Configuración → Notificaciones para enviar todas.");
+        }
+
+        if ($productosParaTelegram->isNotEmpty()) {
+            try {
+                (new NotificadorTelegram)->enviarResumenOfertasPorCanal($productosParaTelegram, $tiendaOrigen);
+            } catch (\Throwable $e) {
+                Log::warning('RastrearTienda: no se pudo enviar resumen por canal a Telegram', ['mensaje' => $e->getMessage()]);
+            }
+        }
+        // Cola prioritaria: Amazon y Mercado Libre → queue 'high' (worker: --queue=high,default).
+        // Amazon con descuento ≥25% → encolar inmediatamente (delay 0); resto espaciado 4 s.
         foreach ($productosParaTelegram as $index => $producto) {
+            $cola = in_array($tiendaOrigen, ['Amazon', 'Mercado Libre'], true) ? 'high' : 'default';
+            $delaySegundos = $index * 4;
+            if ($tiendaOrigen === 'Amazon') {
+                $porcentaje = $this->calculadoraOfertas->calcularPorcentajeAhorro(
+                    (float) $producto->precio_original,
+                    $producto->precio_oferta
+                );
+                if ($porcentaje !== null && $porcentaje >= 25) {
+                    $delaySegundos = 0;
+                }
+            }
             EnviarOfertaTelegramJob::dispatch($producto)
-                ->delay(now()->addSeconds($index * 5));
-            $encolados++;
+                ->onQueue($cola)
+                ->delay(now()->addSeconds($delaySegundos));
         }
 
         $this->info('Procesados: ' . count($items) . ' productos.');
         $this->info('Registros en historial de precios: ' . count($historialInserts) . '.');
         $msgEncolados = $notificarTodos
-            ? 'Encolados para Telegram (todos con descuento real, ≥' . $porcentajeMinimo . '%): ' . $encolados . '.'
+            ? 'Encolados para Telegram (todos con descuento real; Premium recibe todas, Free ≥' . $porcentajeMinimo . '%): ' . $encolados . '.'
             : 'Encolados para Telegram (solo novedades con ≥' . $porcentajeMinimo . '% descuento): ' . $encolados . '.';
         $this->info($msgEncolados);
+
+        try {
+            (new NotificadorTelegram)->enviarResumenFinalRastreo($tiendaOrigen, count($items), $encolados);
+        } catch (\Throwable $e) {
+            Log::warning('RastrearTienda: no se pudo enviar resumen final a Telegram', ['mensaje' => $e->getMessage()]);
+        }
 
         return 0;
     }

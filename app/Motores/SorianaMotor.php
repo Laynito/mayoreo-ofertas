@@ -27,11 +27,6 @@ class SorianaMotor extends BaseMotorRastreador
         return self::RUTA_OFERTAS;
     }
 
-    protected function getClaveConfigProxy(): ?string
-    {
-        return 'soriana';
-    }
-
     /**
      * Extracción: primero JSON embebido (__NEXT_DATA__, __PRELOADED_STATE__, Vtex __STATE__), luego DOM con selectores básicos.
      *

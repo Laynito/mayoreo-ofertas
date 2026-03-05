@@ -12,7 +12,7 @@ class RastrearTiendaCostco extends Command
 
     protected $signature = 'rastreo:tienda-costco
                             {--max= : Procesar solo los primeros N productos para agilizar}
-                            {--notificar-todos : Encolar a Telegram todos con descuento real, no solo novedades}';
+                            {--notificar-todos : Encolar todas las ofertas con descuento (por defecto solo nuevas o actualizadas)}';
 
     protected $description = 'Rastrea ofertas de Costco México';
 

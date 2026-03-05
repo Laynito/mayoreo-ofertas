@@ -13,7 +13,7 @@ class RastrearTienda extends Command
     protected $signature = 'rastreo:tienda
                             {tienda : Nombre de la tienda (ej. Coppel, Walmart)}
                             {--max= : Procesar solo los primeros N productos (ej. 10 o 20) para agilizar}
-                            {--notificar-todos : Encolar a Telegram todos los que tengan descuento real (precio_oferta < precio_original), no solo novedades}';
+                            {--notificar-todos : Encolar todas las ofertas con descuento (por defecto solo nuevas o actualizadas)}';
 
     protected $description = 'Rastrea ofertas de una tienda, actualiza productos y registra historial de precios';
 

@@ -28,11 +28,6 @@ class BodegaAurreraMotor extends BaseMotorRastreador
         return self::RUTA_OFERTAS;
     }
 
-    protected function getClaveConfigProxy(): ?string
-    {
-        return 'bodega_aurrera';
-    }
-
     /**
      * Extrae productos del JSON dentro de __NEXT_DATA__.
      *

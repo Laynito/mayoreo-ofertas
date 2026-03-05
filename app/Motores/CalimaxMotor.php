@@ -6,14 +6,14 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Calimax (Tijuana / Baja California).
- * Sitio: www.calimax.com.mx (VTEX). Extrae nombre, precio actual, precio original, imagen y categoría.
+ * Sitio: tienda.calimax.com.mx (VTEX). Extrae nombre, precio actual, precio original, imagen y categoría.
  * Basado en la estructura de CoppelMotor: bulk insert, historial, NotificadorTelegram (Premium/Free/Teaser).
  */
 class CalimaxMotor extends BaseMotorRastreador
 {
-    protected const URL_BASE = 'https://www.calimax.com.mx';
+    protected const URL_BASE = 'https://tienda.calimax.com.mx';
 
-    protected const RUTA_OFERTAS = 'ofertas';
+    protected const RUTA_OFERTAS = 'especiales?map=productclusternames';
 
     /** Prefijo para imágenes VTEX cuando vienen relativas. */
     protected const IMAGEN_BASE = 'https://calimaxmx.vtexassets.com';
@@ -21,11 +21,11 @@ class CalimaxMotor extends BaseMotorRastreador
     /** Máximo de productos a extraer por página/sección. */
     protected const MAX_PRODUCTOS = 200;
 
-    /** API de búsqueda VTEX (no requiere JS). */
+    /** API de búsqueda VTEX (JSON puro, no depende de JS en el HTML). */
     protected const API_SEARCH = '/api/catalog_system/pub/products/search';
 
-    /** IDs de cluster a probar para ofertas (VTEX productClusterIds). */
-    protected const CLUSTER_IDS_OFERTAS = [1, 2, 3, 4, 5];
+    /** ID de cluster de especiales en VTEX (prioritario). Si no devuelve nada, se intenta sin fq. */
+    protected const CLUSTER_ESPECIALES = 150;
 
     protected function getUrlBase(): string
     {
@@ -37,9 +37,24 @@ class CalimaxMotor extends BaseMotorRastreador
         return self::RUTA_OFERTAS;
     }
 
-    protected function getClaveConfigProxy(): ?string
+    /**
+     * Cabeceras con Referer fijo. Para peticiones a la API, headers de validación para evitar bloqueos.
+     *
+     * @return array<string, mixed>
+     */
+    protected function getOpcionesPeticion(string $url): array
     {
-        return 'calimax';
+        $headers = [
+            'Referer' => 'https://tienda.calimax.com.mx/',
+        ];
+        if (str_contains($url, '/api/')) {
+            $headers['Accept'] = 'application/json';
+            $headers['Content-Type'] = 'application/json';
+            $headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36';
+            $headers['X-Requested-With'] = 'XMLHttpRequest';
+            $headers['Origin'] = 'https://tienda.calimax.com.mx';
+        }
+        return ['headers' => $headers];
     }
 
     /**
@@ -108,6 +123,16 @@ class CalimaxMotor extends BaseMotorRastreador
             }
             if (! str_starts_with($href, 'http')) {
                 $href = $base . '/' . ltrim($href, '/');
+            }
+            $hrefLower = strtolower($href);
+            foreach (self::DOMINIOS_PORTAL_VTEX as $dominio) {
+                if (str_contains($hrefLower, $dominio)) {
+                    $href = null;
+                    break;
+                }
+            }
+            if ($href === null || $href === '') {
+                continue;
             }
             if (preg_match('/\/(\d+)\/p/', $href, $m)) {
                 $sku = $m[1];
@@ -293,10 +318,7 @@ class CalimaxMotor extends BaseMotorRastreador
         if (is_array($imagenUrl)) {
             $imagenUrl = $imagenUrl['url'] ?? $imagenUrl[0] ?? (is_string($imagenUrl[0] ?? null) ? $imagenUrl[0] : null);
         }
-        $urlOriginal = $item['url'] ?? $item['url_original'] ?? null;
-        if (is_string($urlOriginal) && $urlOriginal !== '' && ! str_starts_with($urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim($urlOriginal, '/');
-        }
+        $urlOriginal = $this->construirUrlPublicaCalimax($item);
 
         return [
             'sku_tienda' => $skuTienda,
@@ -304,7 +326,7 @@ class CalimaxMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta !== null ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal,
             'categoria_origen' => $item['category'] ?? $item['department'] ?? 'Ofertas',
         ];
     }
@@ -330,7 +352,7 @@ class CalimaxMotor extends BaseMotorRastreador
     }
 
     /**
-     * Parsea __STATE__ de VTEX. Soporta listas search.products y también keys "Product:sp-XXX" (Calimax).
+     * Parsea __STATE__ de VTEX. Filtra por claves "Product" (Product:xxx). Soporta listas search.products y Product:sp-XXX.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null, categoria_origen?: string}>
      */
@@ -341,26 +363,29 @@ class CalimaxMotor extends BaseMotorRastreador
             return [];
         }
         $resueltos = [];
-        $items = $data['search']['products'] ?? $data['search']['productSummaries'] ?? $data['productList'] ?? $data['products'] ?? [];
-        if (is_array($items)) {
-            foreach (array_slice($items, 0, 80) as $entrada) {
-                if (is_string($entrada)) {
-                    $producto = $data['Product:' . $entrada] ?? $data['ProductSummary:' . $entrada] ?? null;
-                    if (is_array($producto)) {
-                        $resueltos[] = $producto;
-                    }
-                } elseif (is_array($entrada)) {
-                    $resueltos[] = $entrada;
-                }
+
+        // Prioridad: todas las claves que empiezan por "Product:" (página dinámica VTEX).
+        foreach ($data as $key => $valor) {
+            if (! is_string($key) || ! is_array($valor)) {
+                continue;
+            }
+            if (str_starts_with($key, 'Product:') && substr_count($key, '.') === 0 && (isset($valor['productName']) || isset($valor['name']) || isset($valor['title']))) {
+                $resueltos[] = $valor;
             }
         }
+
         if ($resueltos === []) {
-            foreach ($data as $key => $valor) {
-                if (! is_string($key) || ! is_array($valor)) {
-                    continue;
-                }
-                if (str_starts_with($key, 'Product:sp-') && substr_count($key, '.') === 0 && isset($valor['productName'])) {
-                    $resueltos[] = $valor;
+            $items = $data['search']['products'] ?? $data['search']['productSummaries'] ?? $data['productList'] ?? $data['products'] ?? [];
+            if (is_array($items)) {
+                foreach (array_slice($items, 0, 80) as $entrada) {
+                    if (is_string($entrada)) {
+                        $producto = $data['Product:' . $entrada] ?? $data['ProductSummary:' . $entrada] ?? null;
+                        if (is_array($producto)) {
+                            $resueltos[] = $producto;
+                        }
+                    } elseif (is_array($entrada)) {
+                        $resueltos[] = $entrada;
+                    }
                 }
             }
         }
@@ -379,6 +404,7 @@ class CalimaxMotor extends BaseMotorRastreador
                 }
             }
         }
+
         $productos = [];
         foreach (array_slice($resueltos, 0, self::MAX_PRODUCTOS) as $item) {
             $m = $this->normalizarItemVtex($item, $data);
@@ -386,6 +412,14 @@ class CalimaxMotor extends BaseMotorRastreador
                 $productos[] = $m;
             }
         }
+
+        if ($productos === [] && $data !== []) {
+            $primerasLlaves = array_slice(array_keys($data), 0, 10);
+            Log::warning(static::class . ': __STATE__ sin productos. Primeras 10 llaves del JSON para diagnóstico.', [
+                'llaves' => $primerasLlaves,
+            ]);
+        }
+
         return $productos;
     }
 
@@ -477,12 +511,46 @@ class CalimaxMotor extends BaseMotorRastreador
             $result['oferta'] = (float) str_replace(',', '', $m[2]);
             return $result;
         }
-        // Un precio: $59.90
-        if (preg_match('/\$([\d.,]+)/', $fragmento, $m)) {
-            $result['original'] = (float) str_replace(',', '', $m[1]);
-            return $result;
+        // Un precio: $59.90 (evitar capturar "1" de "1x" o "2x" — exigir decimal o al menos 2 dígitos)
+        if (preg_match_all('/\$([\d.,]+)/', $fragmento, $m)) {
+            foreach ($m[1] as $candidato) {
+                $v = (float) str_replace(',', '', $candidato);
+                if ($v >= 2 || str_contains($candidato, '.') || str_contains($candidato, ',')) {
+                    $result['original'] = $v;
+                    return $result;
+                }
+            }
         }
         return $result;
+    }
+
+    /**
+     * Extrae precio desde un nodo de __STATE__ que puede ser número o referencia a objeto con highPrice/lowPrice.
+     *
+     * @param  array<string, mixed>  $priceData  Nodo priceRange del producto
+     * @param  array<string, mixed>  $state  __STATE__ completo
+     * @param  bool  $preferHigh  Si true, usar highPrice (precio lista); si false, lowPrice (oferta).
+     */
+    protected function extraerPrecioDesdeState(array $priceData, string $key, array $state, bool $preferHigh = false): float
+    {
+        $val = $priceData[$key] ?? $priceData['ListPrice'] ?? $priceData['SellingPrice'] ?? null;
+        if (is_numeric($val)) {
+            return (float) $val;
+        }
+        if (is_array($val) && isset($val['id'])) {
+            $refId = (string) $val['id'];
+            $refKey = ltrim($refId, '$');
+            $resuelto = $state[$refKey] ?? $state[$refId] ?? null;
+            if (is_array($resuelto)) {
+                $p = $preferHigh
+                    ? (float) ($resuelto['highPrice'] ?? $resuelto['lowPrice'] ?? $resuelto['price'] ?? 0)
+                    : (float) ($resuelto['lowPrice'] ?? $resuelto['highPrice'] ?? $resuelto['price'] ?? 0);
+                if ($p > 0) {
+                    return $p;
+                }
+            }
+        }
+        return 0.0;
     }
 
     protected function construirUrlImagenCalimax(string $sku): ?string
@@ -491,6 +559,32 @@ class CalimaxMotor extends BaseMotorRastreador
             return null;
         }
         return self::IMAGEN_BASE . '/arquivos/ids/' . $sku . '-1.jpg';
+    }
+
+    /** Dominios de VTEX que no deben usarse como URL de producto (redirigen al login de administración). */
+    private const DOMINIOS_PORTAL_VTEX = ['myvtex.com', 'vtexcommercestable.com.br', 'portal.'];
+
+    /**
+     * Construye la URL pública del producto. SOLO se usa linkText; el campo link de la API
+     * suele apuntar al portal de administración VTEX y no debe usarse nunca.
+     * Estructura: https://tienda.calimax.com.mx/{linkText}/p
+     *
+     * @param  array<string, mixed>  $item  Ítem de la API VTEX (debe contener linkText)
+     * @return string|null  URL pública o null si no hay linkText.
+     */
+    protected function construirUrlPublicaCalimax(array $item): ?string
+    {
+        $base = 'https://tienda.calimax.com.mx';
+        $linkText = trim((string) ($item['linkText'] ?? ''));
+        if ($linkText === '') {
+            return null;
+        }
+        $slug = trim($linkText, '/');
+        $slug = preg_replace('#/+#', '/', $slug);
+        if ($slug === '') {
+            return null;
+        }
+        return $base . '/' . $slug . '/p';
     }
 
     /**
@@ -521,10 +615,7 @@ class CalimaxMotor extends BaseMotorRastreador
         if (is_string($imagenUrl) && $imagenUrl !== '' && ! str_starts_with($imagenUrl, 'http')) {
             $imagenUrl = rtrim(self::IMAGEN_BASE, '/') . '/' . ltrim($imagenUrl, '/');
         }
-        $urlOriginal = $item['url'] ?? $item['link'] ?? $item['href'] ?? null;
-        if (is_string($urlOriginal) && $urlOriginal !== '' && ! str_starts_with($urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim($urlOriginal, '/');
-        }
+        $urlOriginal = $this->construirUrlPublicaCalimax($item);
         $categoria = $item['category'] ?? $item['department'] ?? null;
 
         $out = [
@@ -533,7 +624,7 @@ class CalimaxMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta !== null ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal,
         ];
         if ($categoria !== null && $categoria !== '') {
             $out['categoria_origen'] = is_string($categoria) ? $categoria : (string) $categoria;
@@ -562,10 +653,16 @@ class CalimaxMotor extends BaseMotorRastreador
             $refKey = ltrim($refId, '$');
             $priceData = $state[$refKey] ?? $state[$refId] ?? null;
             if (is_array($priceData)) {
-                $precioOferta = (float) ($priceData['sellingPrice'] ?? $priceData['price'] ?? 0);
-                $precioOriginal = (float) ($priceData['listPrice'] ?? $priceData['ListPrice'] ?? $precioOferta);
+                $precioOferta = $this->extraerPrecioDesdeState($priceData, 'sellingPrice', $state);
+                $precioOriginal = $this->extraerPrecioDesdeState($priceData, 'listPrice', $state);
                 if ($precioOriginal <= 0) {
-                    $precioOriginal = $precioOferta;
+                    $precioOriginal = $this->extraerPrecioDesdeState($priceData, 'listPrice', $state, true);
+                    if ($precioOriginal <= 0) {
+                        $precioOriginal = $precioOferta;
+                    }
+                }
+                if ($precioOferta <= 0 && $precioOriginal > 0) {
+                    $precioOferta = $precioOriginal;
                 }
             }
         }
@@ -593,6 +690,9 @@ class CalimaxMotor extends BaseMotorRastreador
         if ($precioOferta <= 0 && $precioOriginal <= 0) {
             return null;
         }
+        if ($precioOriginal === 1.0 && $precioOferta === 1.0) {
+            return null;
+        }
 
         $skuTienda = 'CAL-' . ($sku ?: substr(md5($nombre), 0, 12));
         $imagenUrl = $item['image'] ?? $item['imageUrl'] ?? $item['images'][0] ?? null;
@@ -605,13 +705,7 @@ class CalimaxMotor extends BaseMotorRastreador
         if (($imagenUrl === null || $imagenUrl === '') && $sku !== '') {
             $imagenUrl = $this->construirUrlImagenCalimax($sku);
         }
-        $urlOriginal = $item['url'] ?? $item['link'] ?? $item['slug'] ?? null;
-        if (is_string($urlOriginal) && $urlOriginal !== '' && ! str_starts_with($urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim($urlOriginal, '/');
-        }
-        if (is_string($urlOriginal) && $urlOriginal !== '' && ! str_starts_with($urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim($urlOriginal, '/');
-        }
+        $urlOriginal = $this->construirUrlPublicaCalimax($item);
 
         return [
             'sku_tienda' => $skuTienda,
@@ -619,13 +713,14 @@ class CalimaxMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta < $precioOriginal ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal,
             'categoria_origen' => $item['category'] ?? $item['department'] ?? 'Ofertas',
         ];
     }
 
     /**
-     * Recolecta ofertas: primero intenta la API de búsqueda VTEX (no requiere JS); si falla o no hay datos, usa HTML.
+     * Recolecta ofertas vía API VTEX (estrategia principal; el HTML de especiales depende de JS).
+     * API: productName, items[0].sellers[0].commertialOffer.Price, items[0].images[0].imageUrl.
      */
     public function recolectarDatos(): array
     {
@@ -664,8 +759,8 @@ class CalimaxMotor extends BaseMotorRastreador
     }
 
     /**
-     * Intenta obtener productos desde la API de búsqueda VTEX (no requiere JS).
-     * GET /api/catalog_system/pub/products/search?fq=productClusterIds:XXXX
+     * Obtiene productos desde la API de catálogo VTEX (JSON puro). VTEX IO no sirve para rastreo HTML.
+     * URL con _from/_to=49; si cluster 150 no devuelve nada, se intenta sin fq.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null, categoria_origen?: string}>
      */
@@ -674,32 +769,45 @@ class CalimaxMotor extends BaseMotorRastreador
         $base = rtrim($this->getUrlBase(), '/');
         $productos = [];
 
-        foreach (self::CLUSTER_IDS_OFERTAS as $clusterId) {
-            $url = $base . self::API_SEARCH . '?fq=productClusterIds:' . $clusterId;
-            $resultado = $this->realizarPeticion($url);
-            if ($resultado === null || $resultado['status'] !== 200) {
-                continue;
-            }
+        $urlConFq = $base . self::API_SEARCH . '?fq=productClusterIds:' . self::CLUSTER_ESPECIALES . '&_from=0&_to=49';
+        $resultado = $this->realizarPeticion($urlConFq);
+
+        if ($resultado !== null && ($resultado['status'] === 401 || $resultado['status'] === 403)) {
+            Log::error('API Bloqueada', ['cuerpo' => $resultado['body'], 'url' => $urlConFq, 'status' => $resultado['status']]);
+        }
+
+        if ($resultado !== null && $resultado['status'] === 200) {
             $data = json_decode($resultado['body'], true);
-            if (! is_array($data)) {
-                continue;
+            if (! is_array($data) && $resultado['body'] !== '') {
+                Log::warning('CalimaxMotor: respuesta API no es JSON (posible Captcha).', [
+                    'inicio_respuesta' => mb_substr($resultado['body'], 0, 500),
+                    'url' => $urlConFq,
+                ]);
             }
-            foreach ($data as $item) {
-                $m = $this->mapearItemApiVtex($item);
-                if ($m !== null) {
-                    $productos[] = $m;
+            if (is_array($data)) {
+                foreach ($data as $item) {
+                    $m = $this->mapearItemApiVtex($item);
+                    if ($m !== null) {
+                        $productos[] = $m;
+                    }
                 }
-            }
-            if (! empty($productos)) {
-                break;
             }
         }
 
         if (empty($productos)) {
-            $urlSinFq = $base . self::API_SEARCH;
+            $urlSinFq = $base . self::API_SEARCH . '?_from=0&_to=49';
             $resultado = $this->realizarPeticion($urlSinFq);
+            if ($resultado !== null && ($resultado['status'] === 401 || $resultado['status'] === 403)) {
+                Log::error('API Bloqueada', ['cuerpo' => $resultado['body'], 'url' => $urlSinFq, 'status' => $resultado['status']]);
+            }
             if ($resultado !== null && $resultado['status'] === 200) {
                 $data = json_decode($resultado['body'], true);
+                if (! is_array($data) && $resultado['body'] !== '') {
+                    Log::warning('CalimaxMotor: respuesta API no es JSON (posible Captcha).', [
+                        'inicio_respuesta' => mb_substr($resultado['body'], 0, 500),
+                        'url' => $urlSinFq,
+                    ]);
+                }
                 if (is_array($data)) {
                     foreach (array_slice($data, 0, self::MAX_PRODUCTOS) as $item) {
                         $m = $this->mapearItemApiVtex($item);
@@ -726,13 +834,13 @@ class CalimaxMotor extends BaseMotorRastreador
         if ($nombre === '') {
             return null;
         }
-        $productId = (string) ($item['productId'] ?? $item['productReference'] ?? '');
-        $skuTienda = 'CAL-' . ($productId ?: substr(md5($nombre), 0, 12));
+        $items = $item['items'] ?? [];
+        $primerItem = is_array($items) ? ($items[0] ?? []) : [];
+        $itemId = (string) ($primerItem['itemId'] ?? $primerItem['referenceId'] ?? $item['productId'] ?? $item['productReference'] ?? '');
+        $skuTienda = 'CAL-' . ($itemId ?: substr(md5($nombre), 0, 12));
 
         $precioOriginal = 0.0;
         $precioOferta = null;
-        $items = $item['items'] ?? [];
-        $primerItem = is_array($items) ? ($items[0] ?? []) : [];
         $sellers = $primerItem['sellers'] ?? [];
         $primerSeller = is_array($sellers) ? ($sellers[0] ?? []) : [];
         $offer = $primerSeller['commertialOffer'] ?? $primerSeller['commercialOffer'] ?? [];
@@ -746,19 +854,14 @@ class CalimaxMotor extends BaseMotorRastreador
         if ($precioOferta <= 0 && $precioOriginal <= 0) {
             return null;
         }
+        if ($precioOriginal === 1.0 && $precioOferta <= 1.0) {
+            return null;
+        }
         if ($precioOferta !== null && $precioOferta >= $precioOriginal) {
             $precioOferta = null;
         }
 
-        $link = $item['link'] ?? $item['linkText'] ?? $item['url'] ?? '';
-        if (is_string($link) && $link !== '') {
-            if (! str_starts_with($link, 'http')) {
-                $link = rtrim($this->getUrlBase(), '/') . '/' . ltrim(str_replace('\u002F', '/', $link), '/');
-            }
-        } else {
-            $linkText = $item['linkText'] ?? '';
-            $link = $this->getUrlBase() . '/' . ltrim((string) $linkText, '/') . '/p';
-        }
+        $link = $this->construirUrlPublicaCalimax($item);
 
         $imagenUrl = null;
         if (isset($primerItem['images']) && is_array($primerItem['images']) && isset($primerItem['images'][0])) {
@@ -769,12 +872,14 @@ class CalimaxMotor extends BaseMotorRastreador
         if (is_string($imagenUrl) && $imagenUrl !== '' && ! str_starts_with($imagenUrl, 'http')) {
             $imagenUrl = rtrim(self::IMAGEN_BASE, '/') . '/' . ltrim($imagenUrl, '/');
         }
-        if (($imagenUrl === null || $imagenUrl === '') && $productId !== '') {
-            $imagenUrl = $this->construirUrlImagenCalimax($productId);
+        if (($imagenUrl === null || $imagenUrl === '') && $itemId !== '') {
+            $imagenUrl = $this->construirUrlImagenCalimax($itemId);
         }
-        $ref = (string) ($primerItem['itemId'] ?? $primerItem['referenceId'] ?? $productId);
-        if ($ref !== '' && ($imagenUrl === null || $imagenUrl === '')) {
-            $imagenUrl = $this->construirUrlImagenCalimax($ref);
+        if ($imagenUrl === null || $imagenUrl === '') {
+            $ref = (string) ($primerItem['referenceId'] ?? $itemId);
+            if ($ref !== '') {
+                $imagenUrl = $this->construirUrlImagenCalimax($ref);
+            }
         }
 
         $categoria = $item['categories'] ?? $item['category'] ?? 'Ofertas';

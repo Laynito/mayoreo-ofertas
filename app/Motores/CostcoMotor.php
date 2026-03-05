@@ -2,19 +2,26 @@
 
 namespace App\Motores;
 
+use App\Support\HttpRastreador;
 use GuzzleHttp\Cookie\CookieJar;
-use GuzzleHttp\Client;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Costco México.
- * Usa Guzzle vía BaseMotorRastreador. Pide primero la Home (/) para obtener cookies de sesión.
+ * Estrategia: intentar API de búsqueda primero (verificar URL en network log del navegador); fallback a HTML.
  */
 class CostcoMotor extends BaseMotorRastreador
 {
     protected const URL_BASE = 'https://www.costco.com.mx';
 
-    /** Ruta actual de ofertas (404 en /ofertas). */
+    /**
+     * Posible endpoint de búsqueda (confirmar en pestaña Network al cargar ofertas).
+     * Si devuelve 404 o no JSON, se usa el fallback HTML.
+     */
+    protected const API_SEARCH = '/api/v1/search';
+
+    /** Sección de liquidaciones/ofertas (sin barra final). */
     protected const RUTA_OFERTAS = 'c/ofertas';
 
     protected const RUTA_OFERTAS_ALT = 'treasure-hunt';
@@ -31,38 +38,69 @@ class CostcoMotor extends BaseMotorRastreador
         return self::RUTA_OFERTAS;
     }
 
-    protected function getClaveConfigProxy(): ?string
-    {
-        return 'costco';
-    }
-
     /**
-     * Cliente con CookieJar para persistir cookies de la Home y enviarlas en ofertas.
+     * Headers de validación para peticiones a la API (evitar bloqueo/Captcha).
+     *
+     * @return array<string, mixed>
      */
-    protected function configurarCliente(): Client
+    protected function getOpcionesPeticion(string $url): array
     {
-        if ($this->cliente !== null) {
-            return $this->cliente;
+        if (! str_contains($url, '/api/')) {
+            return [];
         }
-        $this->cookieJar = new CookieJar;
-        $urlBase = $this->getUrlBase();
-        $opciones = [
-            'timeout' => 15,
-            'connect_timeout' => 10,
-            'allow_redirects' => true,
-            'cookies' => $this->cookieJar,
-            'headers' => $this->obtenerCabecerasNavegador($urlBase),
+        return [
+            'headers' => [
+                'Accept' => 'application/json',
+                'Content-Type' => 'application/json',
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
+                'X-Requested-With' => 'XMLHttpRequest',
+                'Origin' => 'https://www.costco.com.mx',
+            ],
         ];
-        $proxy = config('services.costco.proxy');
-        if (! empty($proxy)) {
-            $opciones['proxy'] = $proxy;
-        }
-        $this->cliente = new Client($opciones);
-        return $this->cliente;
     }
 
     /**
-     * Primero pide la Home (/) para obtener cookies; luego la página de ofertas.
+     * Peticiones con CookieJar para persistir sesión (Home + ofertas). Usa Http de Laravel y PROXY_URL si está definida.
+     *
+     * @return array{body: string, status: int}|null
+     */
+    protected function realizarPeticion(string $url): ?array
+    {
+        $this->pausarEntrePeticiones();
+
+        if ($this->cookieJar === null) {
+            $this->cookieJar = new CookieJar;
+        }
+
+        $cabeceras = $this->obtenerCabecerasNavegador($this->getUrlBase());
+        $opciones = $this->getOpcionesPeticion($url);
+        if (isset($opciones['headers']) && is_array($opciones['headers'])) {
+            $cabeceras = array_merge($cabeceras, $opciones['headers']);
+        }
+
+        $request = Http::withHeaders($cabeceras)
+            ->withOptions(['cookies' => $this->cookieJar])
+            ->timeout(15)
+            ->connectTimeout(10);
+        $request = HttpRastreador::conProxySiTexto($request, $url);
+
+        try {
+            $respuesta = $request->get($url);
+            $this->peticionesRealizadas++;
+
+            return [
+                'body' => $respuesta->body(),
+                'status' => $respuesta->status(),
+            ];
+        } catch (\Throwable $e) {
+            Log::warning(static::class . ': error en petición', ['url' => $url, 'mensaje' => $e->getMessage()]);
+
+            return null;
+        }
+    }
+
+    /**
+     * Primero intenta la API de búsqueda; si no hay JSON válido o no hay datos, fallback a página de ofertas (HTML).
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -70,12 +108,33 @@ class CostcoMotor extends BaseMotorRastreador
     {
         $this->peticionesRealizadas = 0;
         $base = rtrim($this->getUrlBase(), '/');
-        $this->configurarCliente();
 
         $homeUrl = $base . '/';
-        $resultadoHome = $this->realizarPeticion($homeUrl);
-        if ($resultadoHome === null) {
-            Log::info(static::class . ': fallo petición a Home', ['url' => $homeUrl]);
+        $this->realizarPeticion($homeUrl);
+
+        $urlApi = $base . self::API_SEARCH . '?keyword=ofertas';
+        $resultadoApi = $this->realizarPeticion($urlApi);
+
+        if ($resultadoApi !== null && ($resultadoApi['status'] === 401 || $resultadoApi['status'] === 403)) {
+            Log::error('API Bloqueada', ['cuerpo' => $resultadoApi['body'], 'url' => $urlApi, 'status' => $resultadoApi['status']]);
+        }
+
+        if ($resultadoApi !== null && $resultadoApi['status'] === 200) {
+            $body = $resultadoApi['body'];
+            $data = json_decode($body, true);
+            if (! is_array($data) && $body !== '') {
+                Log::warning('CostcoMotor: respuesta API no es JSON (posible Captcha).', [
+                    'inicio_respuesta' => mb_substr($body, 0, 500),
+                    'url' => $urlApi,
+                ]);
+            }
+            if (is_array($data)) {
+                $productos = $this->extraerDesdeApiSearch($data);
+                if (! empty($productos)) {
+                    Log::info(static::class . ': productos obtenidos vía API', ['total' => count($productos)]);
+                    return $productos;
+                }
+            }
         }
 
         $urlOfertas = $base . '/' . ltrim($this->getRutaOfertas(), '/');
@@ -103,6 +162,31 @@ class CostcoMotor extends BaseMotorRastreador
                 'status' => $resultado['status'],
                 'interpretacion' => $resultado['status'] === 403 ? 'posible bloqueo (403)' : 'cambio de estructura',
             ]);
+        }
+        return $productos;
+    }
+
+    /**
+     * Extrae productos del JSON de la API de búsqueda (estructura a confirmar con network log).
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function extraerDesdeApiSearch(array $data): array
+    {
+        $items = $data['products'] ?? $data['items'] ?? $data['results'] ?? $data['data'] ?? [];
+        if (! is_array($items)) {
+            return [];
+        }
+        $productos = [];
+        foreach (array_slice($items, 0, 50) as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $m = $this->normalizarItem($item);
+            if ($m !== null) {
+                $productos[] = $m;
+            }
         }
         return $productos;
     }
@@ -164,10 +248,7 @@ class CostcoMotor extends BaseMotorRastreador
         if (is_array($imagenUrl)) {
             $imagenUrl = $imagenUrl['url'] ?? $imagenUrl[0] ?? null;
         }
-        $urlOriginal = $item['url'] ?? $item['link'] ?? null;
-        if (is_string($urlOriginal) && ! str_starts_with($urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim($urlOriginal, '/');
-        }
+        $urlOriginal = $this->normalizarUrlPublicaCostco($item['url'] ?? $item['link'] ?? null);
 
         return [
             'sku_tienda' => $skuTienda,
@@ -175,7 +256,24 @@ class CostcoMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta > 0 ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal,
         ];
+    }
+
+    /**
+     * Asegura que la URL apunte a la tienda pública (costco.com.mx), no a APIs internas.
+     */
+    protected function normalizarUrlPublicaCostco(?string $url): ?string
+    {
+        if ($url === null || $url === '') {
+            return null;
+        }
+        if (str_contains($url, '/api/') || str_contains($url, 'myvtex.com')) {
+            return null;
+        }
+        if (! str_starts_with($url, 'http')) {
+            $url = self::URL_BASE . '/' . ltrim($url, '/');
+        }
+        return str_starts_with($url, 'https://www.costco.com.mx') ? $url : null;
     }
 }
