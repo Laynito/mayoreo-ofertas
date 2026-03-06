@@ -1,6 +1,33 @@
 # Browsershot (Puppeteer) en Linux / VPS
 
-Para que las capturas de pantalla de bajadas históricas funcionen en un servidor Linux (Ubuntu/Debian), instala las dependencias de sistema y asegura permisos de Chromium.
+Para que las capturas de pantalla de ofertas y bajadas históricas funcionen en un servidor Linux (Ubuntu/Debian), instala Chromium (o Chrome) y las dependencias de sistema.
+
+## 0. Error "Could not find Chrome (ver. x.x)"
+
+Si en los logs aparece **"Could not find Chrome"** o **"cache path is incorrectly configured (/var/www/.cache/puppeteer)"**, Puppeteer no encuentra el navegador. La solución recomendada es usar **Chromium del sistema**:
+
+```bash
+# Instalar Chromium
+sudo apt update
+sudo apt install -y chromium
+
+# Ver la ruta del ejecutable (suele ser /usr/bin/chromium)
+which chromium
+```
+
+En el `.env` del proyecto añade (ajusta la ruta si `which chromium` devuelve otra):
+
+```env
+BROWSERSHOT_CHROME_PATH=/usr/bin/chromium
+```
+
+En algunos sistemas el paquete se llama `chromium-browser`; la ruta puede ser `/usr/bin/chromium-browser`. Después de guardar el `.env`, reinicia el worker de cola (`sudo supervisorctl restart laravel-queue:*`) para que las capturas vuelvan a enviarse.
+
+Comprueba con:
+
+```bash
+php artisan browsershot:verificar
+```
 
 ## 1. Dependencias de sistema (Ubuntu/Debian)
 
@@ -69,7 +96,26 @@ sudo chown -R $USER:$USER node_modules/puppeteer
 chmod -R o+rx node_modules/puppeteer/.local-chromium 2>/dev/null || true
 ```
 
-## 4. Probar capturas
+## 4. Script de instalación rápida
+
+En la raíz del proyecto puedes ejecutar:
+
+```bash
+bash scripts/instalar-dependencias-browsershot.sh
+```
+
+Instala todas las dependencias necesarias (detecta Ubuntu 24.04 y usa los paquetes correctos).
+
+## 5. Probar que Browsershot funciona
+
+```bash
+php artisan browsershot:verificar
+```
+
+Si todo está bien, verás: `✓ Browsershot funciona. Las capturas de bajada histórica deberían enviarse correctamente.`  
+Si falla por librerías, el comando te indicará que ejecutes el script de la sección 4.
+
+## 6. Probar capturas con productos reales
 
 ```bash
 # Probar con productos concretos (sincróno)
@@ -77,3 +123,12 @@ php artisan ofertas:procesar-bajadas --productos=3819,3809 --sync
 ```
 
 Revisa `storage/logs/laravel.log` si la captura falla (timeout, CouldNotTakeBrowsershot).
+
+## 7. Calimax (VTEX)
+
+Para Calimax el código aplica automáticamente:
+
+- **Timeout mínimo 45 s** (la tienda VTEX puede cargar lento).
+- **User-Agent de Chrome real** para reducir bloqueos a navegadores headless.
+
+En los logs verás `Intentando captura Browsershot para Calimax` y, si sale bien, `captura Browsershot Calimax OK`. Si sigue llegando solo texto, confirma en el servidor que Chromium arranca (`php artisan browsershot:verificar`) y que las dependencias están instaladas (sección 1).

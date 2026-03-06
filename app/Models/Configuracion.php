@@ -28,6 +28,11 @@ class Configuracion extends Model
 
     public const CLAVE_ENVIAR_IMAGENES = 'enviar_imagenes';
 
+    /** Tokens OAuth Mercado Libre (guardados tras callback; usados por el motor para API). */
+    public const CLAVE_ML_ACCESS_TOKEN = 'mercado_libre_access_token';
+    public const CLAVE_ML_REFRESH_TOKEN = 'mercado_libre_refresh_token';
+    public const CLAVE_ML_EXPIRES_AT = 'mercado_libre_expires_at';
+
     /** Claves que usan caché (para limpiar todas de golpe). */
     public const CLAVES_CACHE = [
         self::CLAVE_PORCENTAJE_MINIMO,
@@ -102,10 +107,10 @@ class Configuracion extends Model
         return (bool) $v;
     }
 
-    /** Porcentaje mínimo de ahorro para enviar al canal Premium (≥ este % → Premium; 10–(N-1)% → Free). Default 20. */
+    /** Porcentaje mínimo de ahorro para enviar al canal Premium (≥ este % → Premium; 10–(N-1)% → Free). Default 40. */
     public static function porcentajeMinimoParaPremium(): int
     {
-        $v = self::obtener(self::CLAVE_PORCENTAJE_PREMIUM, 20);
+        $v = self::obtener(self::CLAVE_PORCENTAJE_PREMIUM, 40);
 
         return (int) $v;
     }

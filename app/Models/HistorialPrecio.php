@@ -23,6 +23,7 @@ class HistorialPrecio extends Model
         'precio_oferta',
         'porcentaje_ahorro',
         'registrado_en',
+        'bajada_notificada_at',
     ];
 
     protected function casts(): array
@@ -32,6 +33,7 @@ class HistorialPrecio extends Model
             'precio_oferta' => 'decimal:2',
             'porcentaje_ahorro' => 'decimal:2',
             'registrado_en' => 'datetime',
+            'bajada_notificada_at' => 'datetime',
         ];
     }
 

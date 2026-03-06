@@ -200,24 +200,56 @@ class CostcoMotor extends BaseMotorRastreador
         if (preg_match('/<script id="__NEXT_DATA__" type="application\/json">(.+?)<\/script>/s', $body, $coincidencias)) {
             $json = json_decode(trim($coincidencias[1]), true);
             if (is_array($json)) {
-                $productos = $this->mapearDesdeNextData($json);
+                $productos = $this->mapearDesdeNextData($json, $urlPagina);
+            }
+        }
+        if (empty($productos) && preg_match('/<script[^>]*>[\s\S]*?window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/', $body, $preloaded)) {
+            $data = json_decode($preloaded[1], true);
+            if (is_array($data)) {
+                $productos = $this->mapearDesdePreloadedState($data);
             }
         }
         return $productos;
     }
 
     /**
+     * Extrae lista de productos desde __NEXT_DATA__. Prueba varias rutas (Costco puede cambiar estructura).
+     *
      * @param  array<string, mixed>  $data
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
-    protected function mapearDesdeNextData(array $data): array
+    protected function mapearDesdeNextData(array $data, string $urlPagina = ''): array
     {
-        $items = $data['props']['pageProps']['products'] ?? $data['props']['pageProps']['items'] ?? [];
+        $props = $data['props']['pageProps'] ?? $data['props'] ?? [];
+        $items = $props['products'] ?? $props['items'] ?? $props['productList'] ?? null;
         if (! is_array($items)) {
+            $items = $props['initialData']['products'] ?? $props['initialData']['items'] ?? $props['initialData']['productList'] ?? null;
+        }
+        if (! is_array($items)) {
+            $items = $props['data']['products'] ?? $props['data']['items'] ?? null;
+        }
+        if (! is_array($items)) {
+            $initial = $props['initialState'] ?? $data['props']['initialState'] ?? [];
+            $items = $initial['products'] ?? $initial['items'] ?? $initial['searchResult']['products'] ?? [];
+        }
+        if (! is_array($items) && isset($props['initialData']['itemStacks'][0]['items'])) {
+            $items = $props['initialData']['itemStacks'][0]['items'];
+        }
+        if (! is_array($items)) {
+            $items = $this->buscarListaProductosEnArray($data);
+        }
+        if (! is_array($items) || empty($items)) {
+            Log::debug('CostcoMotor: __NEXT_DATA__ sin productos; claves pageProps', [
+                'url' => $urlPagina,
+                'pageProps_keys' => is_array($props) ? array_keys($props) : [],
+            ]);
             return [];
         }
         $productos = [];
         foreach (array_slice($items, 0, 50) as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
             $m = $this->normalizarItem($item);
             if ($m !== null) {
                 $productos[] = $m;
@@ -228,27 +260,94 @@ class CostcoMotor extends BaseMotorRastreador
     }
 
     /**
+     * Busca recursivamente un array de productos/items en la estructura JSON (máximo 4 niveles).
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<int, array<string, mixed>>|null
+     */
+    protected function buscarListaProductosEnArray(array $data, int $nivel = 0): ?array
+    {
+        if ($nivel > 4) {
+            return null;
+        }
+        $pareceListaProductos = function (array $arr): bool {
+            if (count($arr) === 0) {
+                return false;
+            }
+            $first = reset($arr);
+            if (! is_array($first)) {
+                return false;
+            }
+            return isset($first['name'], $first['price'])
+                || isset($first['title'], $first['price'])
+                || isset($first['productName'], $first['salePrice'])
+                || isset($first['productId'], $first['name']);
+        };
+        if ($pareceListaProductos($data)) {
+            return $data;
+        }
+        foreach ($data as $value) {
+            if (! is_array($value)) {
+                continue;
+            }
+            $found = $this->buscarListaProductosEnArray($value, $nivel + 1);
+            if ($found !== null && ! empty($found)) {
+                return $found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Fallback: extracción desde window.__PRELOADED_STATE__ si existe.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function mapearDesdePreloadedState(array $data): array
+    {
+        $items = $data['products'] ?? $data['items'] ?? $data['searchResult']['products'] ?? $data['productList'] ?? [];
+        if (! is_array($items)) {
+            return [];
+        }
+        $productos = [];
+        foreach (array_slice($items, 0, 50) as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $m = $this->normalizarItem($item);
+            if ($m !== null) {
+                $productos[] = $m;
+            }
+        }
+        return $productos;
+    }
+
+    /**
+     * Normaliza un ítem de producto (API o __NEXT_DATA__). Acepta variantes de nombres de campo.
+     *
      * @param  array<string, mixed>  $item
      * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
      */
     protected function normalizarItem(array $item): ?array
     {
-        $sku = (string) ($item['sku'] ?? $item['productId'] ?? $item['id'] ?? '');
-        $nombre = (string) ($item['name'] ?? $item['title'] ?? '');
+        $sku = (string) ($item['sku'] ?? $item['productId'] ?? $item['id'] ?? $item['itemId'] ?? '');
+        $nombre = (string) ($item['name'] ?? $item['title'] ?? $item['productName'] ?? $item['description'] ?? '');
         if ($sku === '' && $nombre === '') {
             return null;
         }
         $skuTienda = 'COS-' . ($sku ?: substr(md5($nombre), 0, 12));
-        $precioOriginal = (float) ($item['listPrice'] ?? $item['regularPrice'] ?? 0);
-        $precioOferta = (float) ($item['salePrice'] ?? $item['price'] ?? 0);
+        $precioOriginal = (float) ($item['listPrice'] ?? $item['regularPrice'] ?? $item['originalPrice'] ?? 0);
+        $precioOferta = (float) ($item['salePrice'] ?? $item['price'] ?? $item['currentPrice'] ?? 0);
         if ($precioOriginal <= 0) {
             $precioOriginal = $precioOferta;
         }
-        $imagenUrl = $item['image'] ?? $item['imageUrl'] ?? null;
+        $imagenUrl = $item['image'] ?? $item['imageUrl'] ?? $item['thumbnail'] ?? $item['picture'] ?? null;
         if (is_array($imagenUrl)) {
-            $imagenUrl = $imagenUrl['url'] ?? $imagenUrl[0] ?? null;
+            $imagenUrl = $imagenUrl['url'] ?? $imagenUrl['src'] ?? $imagenUrl[0] ?? null;
         }
-        $urlOriginal = $this->normalizarUrlPublicaCostco($item['url'] ?? $item['link'] ?? null);
+        $urlRaw = $item['url'] ?? $item['link'] ?? $item['permalink'] ?? $item['path'] ?? null;
+        $urlOriginal = $this->normalizarUrlPublicaCostco(is_string($urlRaw) ? $urlRaw : null);
 
         return [
             'sku_tienda' => $skuTienda,

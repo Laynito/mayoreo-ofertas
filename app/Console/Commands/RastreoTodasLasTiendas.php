@@ -34,6 +34,7 @@ class RastreoTodasLasTiendas extends Command
         $this->info('Iniciando rastreo de todas las tiendas: ' . implode(', ', self::TIENDAS));
 
         $fallos = 0;
+        $offsetOfertasGlobal = 0;
         foreach (self::TIENDAS as $tienda) {
             if (! RastreadorFabrica::tieneMotorPara($tienda)) {
                 $this->warn("No hay motor para [{$tienda}], omitiendo.");
@@ -45,10 +46,13 @@ class RastreoTodasLasTiendas extends Command
             $this->newLine();
             $this->info("——— Rastreando [{$tienda}] ———");
 
+            $encoladosEstaTienda = 0;
             $codigo = $this->runRastreo($tienda, [
                 'max' => $max,
                 'notificar_todos' => $notificarTodos,
-            ]);
+            ], $encoladosEstaTienda, $offsetOfertasGlobal);
+
+            $offsetOfertasGlobal += $encoladosEstaTienda;
 
             if ($codigo !== 0) {
                 $fallos++;
@@ -65,6 +69,7 @@ class RastreoTodasLasTiendas extends Command
         if ($fallos > 0) {
             $this->warn("Tiendas con fallo u omitidas: {$fallos}.");
         }
+        $this->comment('Para que las ofertas lleguen a Telegram, el worker de cola debe estar corriendo (automático con Supervisor: ver docs/COLA-WORKER-AUTOMATIZAR.md). Revisa .env: TELEGRAM_CHAT_ID_PREMIUM y TELEGRAM_CHAT_ID_FREE.');
 
         return $fallos > 0 ? 1 : 0;
     }

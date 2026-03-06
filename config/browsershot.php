@@ -13,12 +13,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Ruta a Chrome/Chromium (opcional)
+    |--------------------------------------------------------------------------
+    | Si Puppeteer no encuentra Chrome (Could not find Chrome ver. x.x), instala
+    | Chromium del sistema (apt install chromium) y define aquí la ruta al binario.
+    | Ejemplo: /usr/bin/chromium o /usr/bin/chromium-browser
+    */
+    'chrome_path' => env('BROWSERSHOT_CHROME_PATH', ''),
+
+    /*
+    |--------------------------------------------------------------------------
     | Timeout captura de pantalla (segundos)
     |--------------------------------------------------------------------------
     | Browsershot/Puppeteer: tiempo máximo para cargar la página y tomar la captura.
-    | Aumentar si las tiendas cargan lento o hay mucho JS.
+    | Aumentar si las tiendas cargan lento o hay mucho JS. Por defecto 45s para más consistencia.
     */
-    'timeout' => (int) env('BROWSERSHOT_TIMEOUT', 30),
+    'timeout' => (int) env('BROWSERSHOT_TIMEOUT', 45),
 
     /*
     |--------------------------------------------------------------------------

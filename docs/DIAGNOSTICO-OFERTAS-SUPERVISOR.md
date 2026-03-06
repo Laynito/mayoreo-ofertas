@@ -71,6 +71,8 @@ Por tanto, en la última ejecución horaria la mayoría de ofertas que pueden sa
 
 4. **Estado de motores**: en Filament, **Rastreo → Estado de motores**, comprobar si Walmart (u otros) están marcados como bloqueados y si quieres reactivarlos más adelante.
 
+5. **Si no ves ofertas de Elektra o Coppel**: (1) Revisa **Admin → Estado de motores**: si están "Bloqueados", reactívalos. (2) Ejecuta a mano `php artisan rastreo:tienda Coppel` y `php artisan rastreo:tienda Elektra`; si sale "0 encolados", prueba con `--notificar-todos` para enviar todas las ofertas con descuento de esa tienda (no solo novedades). (3) Revisa `storage/logs/laravel.log` por errores de CoppelMotor o ElektraMotor (403, timeout, "No se encontraron productos").
+
 ---
 
 ## 5. Conclusión

@@ -16,7 +16,8 @@ class EnviarOfertaTelegramJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 30;
+    /** Tiempo suficiente para descargar imagen (CDN Coppel/Calimax hasta ~45s) y enviar o fallback a solo texto. */
+    public int $timeout = 60;
 
     /** Si el modelo (Producto) fue eliminado antes de ejecutar el job, descartar sin marcar FAIL. */
     public bool $deleteWhenMissingModels = true;
@@ -57,33 +58,17 @@ class EnviarOfertaTelegramJob implements ShouldQueue
             return;
         }
 
-        // Reparación de imágenes: Telegram da "Bad Request" si falta el protocolo
-        if (! empty($producto->imagen_url)) {
-            $url = $producto->imagen_url;
-            if (! preg_match('#^https?://#i', $url)) {
-                $producto->setAttribute('imagen_url', 'https://' . ltrim($url, '/:'));
-            }
-        }
-
         try {
             $notificador->notificarOferta($producto);
         } catch (TelegramRateLimitException $e) {
             throw $e;
         } catch (\Throwable $e) {
-            Log::warning('EnviarOfertaTelegramJob: fallo notificación, reenviando solo texto', [
+            // No reenviar con enviarOfertaSoloTexto: podría haberse enviado ya (foto o texto) y causaría doble mensaje.
+            Log::warning('EnviarOfertaTelegramJob: fallo en notificación', [
                 'producto_id' => $producto->id,
                 'error' => $e->getMessage(),
             ]);
-            try {
-                $notificador->enviarOfertaSoloTexto($producto);
-            } catch (TelegramRateLimitException $e2) {
-                throw $e2;
-            } catch (\Throwable $e2) {
-                Log::warning('EnviarOfertaTelegramJob: fallback solo texto también falló', [
-                    'producto_id' => $producto->id,
-                    'error' => $e2->getMessage(),
-                ]);
-            }
+            throw $e;
         }
     }
 }

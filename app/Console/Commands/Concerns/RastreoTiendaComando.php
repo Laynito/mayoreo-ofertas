@@ -22,8 +22,10 @@ trait RastreoTiendaComando
      * Ejecuta el rastreo para una tienda (misma lógica que RastrearTienda).
      *
      * @param  array{max?: int|null, notificar_todos?: bool}  $options
+     * @param  int|null  $encolados  Si se pasa, se rellena con el número de ofertas encoladas para Telegram.
+     * @param  int  $delayOffsetGlobal  Desplazamiento global para el delay (rastreo:todas unifica una sola cola de ofertas).
      */
-    protected function runRastreo(string $tiendaNombre, array $options = []): int
+    protected function runRastreo(string $tiendaNombre, array $options = [], ?int &$encolados = null, int $delayOffsetGlobal = 0): int
     {
         $max = $options['max'] ?? null;
         $notificarTodos = $options['notificar_todos'] ?? false;
@@ -172,11 +174,6 @@ trait RastreoTiendaComando
         }
         if (! empty($historialInserts)) {
             HistorialPrecio::insert($historialInserts);
-            // Encolar detección de bajadas históricas (≥20% vs registro anterior) con captura Browsershot.
-            $idsConCambio = array_unique(array_column($historialInserts, 'producto_id'));
-            if (! empty($idsConCambio)) {
-                ProcesarBajadaDePrecioJob::dispatch($idsConCambio)->delay(now()->addMinutes(1));
-            }
         }
 
         $porcentajeMinimo = Configuracion::porcentajeMinimoNotificacion();
@@ -209,7 +206,15 @@ trait RastreoTiendaComando
             }
         }
 
+        // Ordenar por mejor descuento primero. Premium recibe todos (0-100%+); Gratis solo 5-29.99%. Encolamos todos.
+        $query->orderByDesc('porcentaje_ahorro');
         $productosParaTelegram = $query->get();
+        $maxOfertasGratis = (int) config('services.telegram.max_ofertas_por_rastreo', 0);
+        $cantidadGratis = $productosParaTelegram->filter(function (Producto $p) {
+            $porcentaje = (float) ($p->porcentaje_ahorro ?? 0);
+            return $porcentaje >= 5.0 && $porcentaje <= 29.99;
+        })->count();
+
         $encolados = $productosParaTelegram->count();
 
         $totalConDescuento = Producto::query()
@@ -221,43 +226,38 @@ trait RastreoTiendaComando
             $this->warn("Filtro activo: solo productos con 'permite descuento adicional'. Excluidos: " . ($totalConDescuento - $encolados) . " de {$totalConDescuento}. Desactívalo en Configuración → Notificaciones para enviar todas.");
         }
 
-        if ($productosParaTelegram->isNotEmpty()) {
-            try {
-                (new NotificadorTelegram)->enviarResumenOfertasPorCanal($productosParaTelegram, $tiendaOrigen);
-            } catch (\Throwable $e) {
-                Log::warning('RastrearTienda: no se pudo enviar resumen por canal a Telegram', ['mensaje' => $e->getMessage()]);
-            }
-        }
-        // Cola prioritaria: Amazon y Mercado Libre → queue 'high' (worker: --queue=high,default).
-        // Amazon con descuento ≥25% → encolar inmediatamente (delay 0); resto espaciado 4 s.
+        // Envío poco a poco unificado: una sola secuencia de delays para todas las tiendas (evita picos por tienda).
+        $delayInicial = (int) config('services.telegram.delay_inicial_ofertas_segundos', 10);
+        $delayEntreOfertas = (int) config('services.telegram.delay_entre_ofertas_segundos', 15);
+        $cola = in_array($tiendaOrigen, ['Amazon', 'Mercado Libre'], true) ? 'high' : 'default';
         foreach ($productosParaTelegram as $index => $producto) {
-            $cola = in_array($tiendaOrigen, ['Amazon', 'Mercado Libre'], true) ? 'high' : 'default';
-            $delaySegundos = $index * 4;
-            if ($tiendaOrigen === 'Amazon') {
-                $porcentaje = $this->calculadoraOfertas->calcularPorcentajeAhorro(
-                    (float) $producto->precio_original,
-                    $producto->precio_oferta
-                );
-                if ($porcentaje !== null && $porcentaje >= 25) {
-                    $delaySegundos = 0;
-                }
-            }
+            $delaySegundos = $delayInicial + (($delayOffsetGlobal + $index) * $delayEntreOfertas);
             EnviarOfertaTelegramJob::dispatch($producto)
                 ->onQueue($cola)
                 ->delay(now()->addSeconds($delaySegundos));
+        }
+        if ($encolados !== null) {
+            $encolados = $productosParaTelegram->count();
+        }
+
+        // Bajadas históricas: solo productos con cambio de precio que NO se enviaron ya como oferta (evita duplicado).
+        if (! empty($historialInserts)) {
+            $idsConCambio = array_unique(array_column($historialInserts, 'producto_id'));
+            $idsYaEnviados = $productosParaTelegram->pluck('id')->all();
+            $idsSoloBajada = array_values(array_diff($idsConCambio, $idsYaEnviados));
+            if (! empty($idsSoloBajada)) {
+                ProcesarBajadaDePrecioJob::dispatch($idsSoloBajada)->delay(now()->addMinutes(1));
+            }
         }
 
         $this->info('Procesados: ' . count($items) . ' productos.');
         $this->info('Registros en historial de precios: ' . count($historialInserts) . '.');
         $msgEncolados = $notificarTodos
-            ? 'Encolados para Telegram (todos con descuento real; Premium recibe todas, Free ≥' . $porcentajeMinimo . '%): ' . $encolados . '.'
-            : 'Encolados para Telegram (solo novedades con ≥' . $porcentajeMinimo . '% descuento): ' . $encolados . '.';
+            ? 'Encolados para Telegram: ' . $encolados . ' (Premium 0-100%+; Gratis solo 5-29.99%, ' . $cantidadGratis . ' en rango).'
+            : 'Encolados para Telegram (solo novedades ≥' . $porcentajeMinimo . '%): ' . $encolados . ' (Premium 0-100%+; Gratis 5-29.99%, ' . $cantidadGratis . ' en rango).';
         $this->info($msgEncolados);
-
-        try {
-            (new NotificadorTelegram)->enviarResumenFinalRastreo($tiendaOrigen, count($items), $encolados);
-        } catch (\Throwable $e) {
-            Log::warning('RastrearTienda: no se pudo enviar resumen final a Telegram', ['mensaje' => $e->getMessage()]);
+        if ($encolados === 0 && count($items) > 0) {
+            $this->warn("Cero ofertas encoladas para [{$tiendaOrigen}]. Prueba con --notificar-todos o revisa Admin → Estado de motores (bloqueado).");
         }
 
         return 0;

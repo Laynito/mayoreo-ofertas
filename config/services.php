@@ -45,6 +45,12 @@ return [
         'chat_id_free' => env('TELEGRAM_CHAT_ID_FREE'),
         'chat_id_premium' => env('TELEGRAM_CHAT_ID_PREMIUM'),
         'premium_join_url' => env('TELEGRAM_PREMIUM_JOIN_URL', ''),
+        // Límite de ofertas por tienda que se envían al canal Gratis en cada rastreo. Premium recibe todas. 0 = sin límite.
+        'max_ofertas_por_rastreo' => (int) env('TELEGRAM_MAX_OFERTAS_POR_RASTREO', 0),
+        // Segundos de espera entre cada oferta encolada (envío poco a poco; reduce timeouts y carga de Browsershot). Recomendado 15–30.
+        'delay_entre_ofertas_segundos' => (int) env('TELEGRAM_DELAY_ENTRE_OFERTAS', 15),
+        // Segundos de espera antes de la primera oferta (evita que la 1ª captura falle por arranque en frío de Chromium).
+        'delay_inicial_ofertas_segundos' => (int) env('TELEGRAM_DELAY_INICIAL_OFERTAS', 10),
     ],
 
     /*
@@ -69,6 +75,10 @@ return [
     ],
     'mercado_libre' => [
         'proxy' => env('MERCADOLIBRE_HTTP_PROXY'),
+        'app_id' => env('ML_APP_ID'),
+        'secret_key' => env('ML_SECRET_KEY'),
+        'redirect_uri' => env('ML_REDIRECT_URI'),
+        'affiliate_id' => env('ML_AFFILIATE_ID'),
     ],
     'elektra' => [
         'proxy' => env('ELEKTRA_HTTP_PROXY'),

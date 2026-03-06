@@ -4,12 +4,14 @@ namespace App\Contratos;
 
 /**
  * Contrato para motores de rastreo de ofertas por tienda.
- * Cada motor (Walmart, Amazon, etc.) debe implementar esta interfaz.
+ * Cada motor (Calimax, Coppel, Elektra, etc.) implementa esta interfaz.
+ * Las notificaciones a Telegram usan siempre captura Browsershot de url_original; imagen_url no se usa para enviar.
  */
 interface RastreadorTiendaInterface
 {
     /**
      * Recolecta datos de productos desde la tienda (scraping o API).
+     * imagen_url es opcional; Telegram recibe captura de la página del producto (Browsershot).
      *
      * @return array<int, array{
      *     sku_tienda: string,

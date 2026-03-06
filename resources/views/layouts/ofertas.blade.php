@@ -21,6 +21,16 @@
     </header>
 
     <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        @if (session('success'))
+            <div class="mb-4 rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-green-800" role="alert">
+                {{ session('success') }}
+            </div>
+        @endif
+        @if (session('error'))
+            <div class="mb-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-red-800" role="alert">
+                {{ session('error') }}
+            </div>
+        @endif
         @yield('content')
     </main>
 

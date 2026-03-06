@@ -19,7 +19,8 @@ class ElektraMotor extends BaseMotorRastreador
 {
     protected const URL_BASE = 'https://www.elektra.mx';
 
-    protected const RUTA_OFERTAS = 'ofertas';
+    /** Página oficial de ofertas semanales: https://www.elektra.mx/ofertas-semanales */
+    protected const RUTA_OFERTAS = 'ofertas-semanales';
 
     /** Ruta alternativa si /ofertas está bloqueada (ej. categoría telefonia/celulares). */
     protected const RUTA_ALTERNATIVA = 'telefonia/celulares';

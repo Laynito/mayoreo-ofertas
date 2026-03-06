@@ -9,7 +9,7 @@ return [
     | CDNs como Coppel pueden ser lentos. Aumentar a 20-30s evita fallos al
     | enviar ofertas con foto. En segundos.
     */
-    'timeout_imagen_telegram' => (int) env('RASTREADOR_TIMEOUT_IMAGEN_TELEGRAM', 25),
+    'timeout_imagen_telegram' => (int) env('RASTREADOR_TIMEOUT_IMAGEN_TELEGRAM', 35),
 
     /*
     |--------------------------------------------------------------------------

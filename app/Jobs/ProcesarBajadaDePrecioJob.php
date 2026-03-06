@@ -14,9 +14,9 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Evalúa si el precio actual del producto es al menos un 20% más barato que el
+ * Evalúa si el precio actual del producto tiene una bajada significativa respecto al
  * último registro en el historial (precio "ayer") y, si aplica, notifica por Telegram
- * con captura de pantalla (Browsershot) mostrando "Precio Ayer" vs "Precio Hoy".
+ * vía enviarOfertaSegunCalidad: ≥30% → canal Premium (con captura); 10–29.9% → canal Gratis (solo texto).
  *
  * Respeta la restricción por producto: si permite_descuento_adicional es false,
  * no se notifica la bajada.
@@ -28,8 +28,8 @@ class ProcesarBajadaDePrecioJob implements ShouldQueue
     use Queueable;
     use SerializesModels;
 
-    /** Porcentaje mínimo de bajada para considerar "bajada histórica" (20%). */
-    public const UMBRAL_BAJADA_PORCENTAJE = 20.0;
+    /** Porcentaje mínimo de bajada para enviar a algún canal (10%). Por debajo no se notifica. */
+    public const MINIMO_BAJADA_PORCENTAJE = 10.0;
 
     public int $tries = 2;
 
@@ -73,6 +73,19 @@ class ProcesarBajadaDePrecioJob implements ShouldQueue
      */
     protected function obtenerPrecioAyer(Producto $producto): ?float
     {
+        $datos = $this->obtenerDatosBajada($producto);
+
+        return $datos['precio_ayer'] ?? null;
+    }
+
+    /**
+     * Devuelve datos para evaluar la bajada: precio ayer, precio hoy y el registro
+     * de historial más reciente (para marcar si ya se notificó y evitar duplicados).
+     *
+     * @return array{precio_ayer: float, precio_hoy: float, ultimo_registro: HistorialPrecio}|null
+     */
+    protected function obtenerDatosBajada(Producto $producto): ?array
+    {
         $registros = HistorialPrecio::query()
             ->where('producto_id', $producto->id)
             ->orderByDesc('registrado_en')
@@ -83,10 +96,21 @@ class ProcesarBajadaDePrecioJob implements ShouldQueue
             return null;
         }
 
-        $ayer = $registros->last();
-        $precio = $ayer->precio_oferta ?? $ayer->precio_original;
+        $ultimo = $registros->first();
+        $penultimo = $registros->last();
 
-        return $precio !== null ? (float) $precio : null;
+        $precioAyer = $penultimo->precio_oferta ?? $penultimo->precio_original;
+        $precioHoy = $ultimo->precio_oferta ?? $ultimo->precio_original;
+
+        if ($precioAyer === null || $precioHoy === null) {
+            return null;
+        }
+
+        return [
+            'precio_ayer' => (float) $precioAyer,
+            'precio_hoy' => (float) $precioHoy,
+            'ultimo_registro' => $ultimo,
+        ];
     }
 
     /**
@@ -120,22 +144,35 @@ class ProcesarBajadaDePrecioJob implements ShouldQueue
             return;
         }
 
-        $precioAyer = $this->obtenerPrecioAyer($producto);
-        if ($precioAyer === null || $precioAyer <= 0) {
+        $datos = $this->obtenerDatosBajada($producto);
+        if ($datos === null) {
             return;
         }
 
-        $precioHoy = $this->obtenerPrecioHoy($producto);
-        $porcentajeBajada = $this->calcularPorcentajeBajada($precioAyer, $precioHoy);
+        $precioAyer = $datos['precio_ayer'];
+        $precioHoy = $datos['precio_hoy'];
+        $ultimoRegistro = $datos['ultimo_registro'];
 
-        if ($porcentajeBajada === null || $porcentajeBajada < self::UMBRAL_BAJADA_PORCENTAJE) {
+        // Evitar reenviar la misma bajada cada vez que corre el Job (cada 5 min).
+        if ($ultimoRegistro->bajada_notificada_at !== null) {
+            return;
+        }
+
+        $bajada = $this->calcularPorcentajeBajada($precioAyer, $precioHoy);
+        if ($bajada === null || $bajada < self::MINIMO_BAJADA_PORCENTAJE) {
             return;
         }
 
         try {
-            $notificador->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy);
+            $notificador->enviarOfertaSegunCalidad($producto, $bajada, $precioAyer, $precioHoy);
+            $ultimoRegistro->update(['bajada_notificada_at' => now()]);
+            Log::info('ProcesarBajadaDePrecioJob: oferta enviada según calidad', [
+                'producto_id' => $producto->id,
+                'sku_tienda' => $producto->sku_tienda,
+                'bajada_porcentaje' => round($bajada, 1),
+            ]);
         } catch (\Throwable $e) {
-            Log::warning('ProcesarBajadaDePrecioJob: fallo al notificar bajada histórica', [
+            Log::warning('ProcesarBajadaDePrecioJob: fallo al notificar bajada', [
                 'producto_id' => $producto->id,
                 'sku_tienda' => $producto->sku_tienda,
                 'error' => $e->getMessage(),

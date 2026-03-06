@@ -7,36 +7,106 @@ use Illuminate\Support\Facades\Http;
 
 /**
  * Cliente HTTP para motores de rastreo.
- * Si PROXY_URL está definida en .env, todo el tráfico de texto (HTML/API) pasa por el proxy;
- * las imágenes se piden con IP local (ahorro de datos).
+ * Un solo método (conProxySiTexto/conProxy) aplica proxy + cabeceras de navegador + SSL base; no se aplican dos veces.
+ * Si PROXY_URL está definida, el tráfico de texto pasa por el proxy; las imágenes con IP local.
  */
 final class HttpRastreador
 {
     /**
-     * Devuelve una instancia de Http (PendingRequest) con proxy aplicado cuando PROXY_URL está configurada.
-     * Uso: HttpRastreador::conProxy(Http::withHeaders(...))->timeout(15)->get($url)
+     * Cabeceras de navegador real para peticiones públicas (modo incógnito; sin token).
+     *
+     * @return array<string, string>
+     */
+    public static function headersNavegador(): array
+    {
+        return [
+            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept-Language' => 'es-MX,es;q=0.9',
+            'Referer' => 'https://www.mercadolibre.com.mx/',
+        ];
+    }
+
+    /**
+     * Configuración base del cliente para proxy residencial (Smartproxy / Hostinger).
+     * connect_timeout 60s, HTTP/1.1 forzado, TLS 1.2, cipher relajado.
+     *
+     * @return array{verify: bool, connect_timeout: int, version: float, curl: array<int, mixed>}
+     */
+    public static function opcionesSslBase(): array
+    {
+        return [
+            'verify' => false,
+            'connect_timeout' => 60,
+            'version' => 1.1,
+            'curl' => [
+                \CURLOPT_SSLVERSION => \CURL_SSLVERSION_TLSv1_2,
+                \CURLOPT_HTTPPROXYTUNNEL => 1,
+                \CURLOPT_HTTP_VERSION => \CURL_HTTP_VERSION_1_1,
+                \CURLOPT_SSL_CIPHER_LIST => 'DEFAULT@SECLEVEL=1',
+                \CURLOPT_IPRESOLVE => \CURL_IPRESOLVE_V4,
+                \CURLOPT_TCP_KEEPALIVE => 1,
+                \CURLOPT_BUFFERSIZE => 64000,
+            ],
+        ];
+    }
+
+    /**
+     * Opciones para peticiones que usan proxy (SSL base + proxy URL). Para uso directo cuando no se usa conProxy.
+     *
+     * @return array{verify: bool, proxy?: string, curl: array<int, int>}
+     */
+    public static function opcionesProxy(): array
+    {
+        $proxy = config('services.proxy_url');
+        $opciones = self::opcionesSslBase();
+        if ($proxy !== null && $proxy !== '') {
+            $opciones['proxy'] = $proxy;
+        }
+
+        return $opciones;
+    }
+
+    /**
+     * Único punto que aplica proxy + cabeceras de navegador + SSL base. Las cabeceras de navegador solo se añaden cuando hay proxy.
      */
     public static function conProxy(PendingRequest $request): PendingRequest
     {
         $proxy = config('services.proxy_url');
+        $opciones = self::opcionesSslBase();
         if ($proxy !== null && $proxy !== '') {
-            return $request->withOptions(['proxy' => $proxy]);
+            $request = $request->withHeaders(self::headersNavegador());
+            $opciones['proxy'] = $proxy;
         }
 
-        return $request;
+        return $request->withOptions($opciones);
     }
 
     /**
-     * Aplica proxy solo para peticiones de texto (HTML, API, JSON). Las URLs de imagen se piden con IP local.
-     * Uso en motores: HttpRastreador::conProxySiTexto($request, $url)->get($url)
+     * Aplica proxy (y headers + SSL) solo para URLs de texto. Las imágenes no pasan por proxy.
      */
     public static function conProxySiTexto(PendingRequest $request, string $url): PendingRequest
     {
         if (self::esUrlDeImagen($url)) {
-            return $request;
+            return $request->withOptions(self::opcionesSslBase());
         }
 
         return self::conProxy($request);
+    }
+
+    /**
+     * Con proxy activo, devuelve http:// para api.mercadolibre.com (evita Error 35 en Hostinger).
+     * El proxy hace HTTPS hacia ML; la salida desde el servidor es HTTP.
+     */
+    public static function urlApiMlParaProxy(string $url): string
+    {
+        if (config('services.proxy_url') === null || config('services.proxy_url') === '') {
+            return $url;
+        }
+        if (str_starts_with($url, 'https://api.mercadolibre.com')) {
+            return 'http://api.mercadolibre.com' . substr($url, 28);
+        }
+
+        return $url;
     }
 
     /**

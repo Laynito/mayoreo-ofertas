@@ -2,14 +2,19 @@
 
 namespace App\Motores;
 
+use App\Services\EstadoMotorService;
+use App\Support\HttpRastreador;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Mercado Libre México (API pública MLM).
- * Endpoint: sites/MLM/search?q=ofertas&sort=price_asc&filter_id=discount. Sin proxy (consumo eficiente).
- * Mapeo: title, price, original_price, thumbnail, permalink. Solo se notifica si descuento >15% (RastreoTiendaComando).
- * Fallback: scraping HTML de ofertas.
+ *
+ * Reglas finales:
+ * - Búsqueda anónima: peticiones a la API de promociones a través del proxy SIN AccessToken (petición pública) para evitar bloqueos.
+ * - Comisión de afiliado: ID 187001804; se inyecta &micosmtics=187001804 en cada enlace guardado (ML_AFFILIATE_ID en .env).
+ * - Restricción de producto: si en Filament el producto tiene "Permitir descuento adicional" desactivado, el bot no modifica su precio ni aplica rebajas automáticas (lógica en RastreoTiendaComando y CalculadoraOfertas).
+ * - Código y comentarios en español.
  */
 class MercadoLibreMotor extends BaseMotorRastreador
 {
@@ -17,8 +22,8 @@ class MercadoLibreMotor extends BaseMotorRastreador
 
     protected const RUTA_OFERTAS = 'ofertas';
 
-    /** Endpoint principal API MLM (México): ofertas, orden por precio, solo con descuento real. Sin proxy. */
-    private const API_BUSQUEDA = 'https://api.mercadolibre.com/sites/MLM/search';
+    /** Endpoint de promociones (site_id=MLM en query, no en la ruta). */
+    private const API_PROMOCIONES = 'https://api.mercadolibre.com/promotions/search';
 
     protected function getUrlBase(): string
     {
@@ -31,8 +36,24 @@ class MercadoLibreMotor extends BaseMotorRastreador
     }
 
     /**
-     * Recolecta primero vía API MLM con filtro de ofertas; si falla, HTML.
-     * Respeta permite_descuento_adicional (aplicado en RastreoTiendaComando al encolar).
+     * Cabeceras para petición pública (búsqueda anónima; sin token ni App ID).
+     * User-Agent Chrome y Referer para que la API no bloquee con proxy.
+     *
+     * @return array<string, string>
+     */
+    private function obtenerHeadersSoloML(): array
+    {
+        return [
+            'Accept' => 'application/json',
+            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept-Language' => 'es-MX,es;q=0.9',
+            'Referer' => 'https://www.mercadolibre.com.mx/',
+        ];
+    }
+
+    /**
+     * Recolecta primero vía API MLM (promociones); si falla, intenta HTML.
+     * La restricción permite_descuento_adicional se aplica al encolar/notificar, no aquí.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -40,7 +61,13 @@ class MercadoLibreMotor extends BaseMotorRastreador
     {
         $productos = $this->recolectarDesdeApi();
         if (! empty($productos)) {
-            Log::info('MercadoLibreMotor: productos obtenidos vía API MLM', ['cantidad' => count($productos)]);
+            $usaProxy = config('services.proxy_url') !== null && config('services.proxy_url') !== '';
+            Log::info('MercadoLibreMotor: productos extraídos vía API MLM' . ($usaProxy ? ' (con proxy)' : ''), [
+                'cantidad' => count($productos),
+                'con_proxy' => $usaProxy,
+            ]);
+            // Respuesta exitosa (200 OK): asegurar que el motor no quede marcado como bloqueado por el sistema de salud.
+            app(EstadoMotorService::class)->reactivar('Mercado Libre');
             return $productos;
         }
 
@@ -48,22 +75,25 @@ class MercadoLibreMotor extends BaseMotorRastreador
     }
 
     /**
-     * Llama al endpoint principal MLM con filtros inteligentes (solo productos con descuento).
-     * Sin proxy: la API permite miles de peticiones desde la IP del servidor sin bloqueo.
+     * Búsqueda anónima: petición 100% pública a /promotions/search a través del proxy, sin AccessToken.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     protected function recolectarDesdeApi(): array
     {
-        $url = self::API_BUSQUEDA . '?q=ofertas&sort=price_asc&limit=50&filter_id=discount';
-        $request = Http::withHeaders([
-            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
-            'Accept' => 'application/json',
-        ])->timeout(15);
+        $url = self::API_PROMOCIONES . '?site_id=MLM&type=ALL&limit=50';
+        $proxyActivo = config('services.proxy_url') !== null && config('services.proxy_url') !== '';
+        $headers = $proxyActivo ? $this->obtenerHeadersSoloML() : array_merge(HttpRastreador::headersNavegador(), $this->obtenerHeadersSoloML());
+
+        $request = Http::withHeaders($headers)->timeout(60)->connectTimeout(30);
+        $request = HttpRastreador::conProxySiTexto($request, $url);
         $respuesta = $request->get($url);
 
         if (! $respuesta->successful()) {
             Log::debug('MercadoLibreMotor: API no exitosa', ['status' => $respuesta->status()]);
+            if ($respuesta->status() === 403) {
+                Log::info('MercadoLibreMotor: 403 (tengine/PolicyAgent). Rotar sesión del proxy en PROXY_URL (ej. otro session-XXX).');
+            }
             return [];
         }
 
@@ -85,7 +115,7 @@ class MercadoLibreMotor extends BaseMotorRastreador
     }
 
     /**
-     * Mapeo de datos API: title, price (precio con descuento), original_price, thumbnail (imagen), permalink (URL).
+     * Mapeo de ítem API: título, precio original, precio oferta, thumbnail, permalink con micosmtics.
      *
      * @param  array<string, mixed>  $item
      * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
@@ -107,10 +137,11 @@ class MercadoLibreMotor extends BaseMotorRastreador
         if ($imagenUrl !== null && ! is_string($imagenUrl)) {
             $imagenUrl = null;
         }
-        $urlOriginal = $item['permalink'] ?? null;
-        if ($urlOriginal !== null && ! str_starts_with((string) $urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim((string) $urlOriginal, '/');
+        $permalink = $item['permalink'] ?? null;
+        if ($permalink !== null && ! str_starts_with((string) $permalink, 'http')) {
+            $permalink = self::URL_BASE . '/' . ltrim((string) $permalink, '/');
         }
+        $urlOriginal = $permalink ? self::inyectarAfiliadoEnPermalink((string) $permalink) : null;
 
         return [
             'sku_tienda' => $skuTienda,
@@ -118,11 +149,26 @@ class MercadoLibreMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta > 0 && $precioOferta < $precioOriginal ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal,
         ];
     }
 
     /**
+     * Comisión de afiliado: inyecta &micosmtics=187001804 en cada enlace (ID desde ML_AFFILIATE_ID o 187001804 por defecto).
+     */
+    private static function inyectarAfiliadoEnPermalink(string $permalink): string
+    {
+        $idAfiliado = config('services.mercado_libre.affiliate_id') ?: '187001804';
+        if ($idAfiliado === '') {
+            return $permalink;
+        }
+
+        return $permalink . (str_contains($permalink, '?') ? '&' : '?') . 'micosmtics=' . $idAfiliado;
+    }
+
+    /**
+     * Extrae productos desde el HTML de la página (fallback cuando la API no responde).
+     *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     protected function extraerProductosDeRespuesta(string $body, string $urlPagina): array
@@ -142,6 +188,8 @@ class MercadoLibreMotor extends BaseMotorRastreador
     }
 
     /**
+     * Mapea ítems desde __NEXT_DATA__ del HTML.
+     *
      * @param  array<string, mixed>  $data
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -163,6 +211,8 @@ class MercadoLibreMotor extends BaseMotorRastreador
     }
 
     /**
+     * Normaliza un ítem del HTML/Next data (mismo formato que API; enlaces con micosmtics).
+     *
      * @param  array<string, mixed>  $item
      * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
      */
@@ -180,10 +230,11 @@ class MercadoLibreMotor extends BaseMotorRastreador
             $precioOferta = $precio;
         }
         $imagenUrl = $item['thumbnail'] ?? $item['picture'] ?? null;
-        $urlOriginal = $item['permalink'] ?? $item['url'] ?? null;
-        if (is_string($urlOriginal) && ! str_starts_with($urlOriginal, 'http')) {
-            $urlOriginal = self::URL_BASE . '/' . ltrim($urlOriginal, '/');
+        $permalink = $item['permalink'] ?? $item['url'] ?? null;
+        if (is_string($permalink) && ! str_starts_with($permalink, 'http')) {
+            $permalink = self::URL_BASE . '/' . ltrim($permalink, '/');
         }
+        $urlOriginal = $permalink ? self::inyectarAfiliadoEnPermalink((string) $permalink) : null;
 
         return [
             'sku_tienda' => $sku,
@@ -191,7 +242,7 @@ class MercadoLibreMotor extends BaseMotorRastreador
             'precio_original' => round($precio > 0 ? $precio : $precioOferta, 2),
             'precio_oferta' => $precioOferta > 0 ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal,
         ];
     }
 }
