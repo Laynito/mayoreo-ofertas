@@ -37,15 +37,25 @@ return [
 
     'admitad' => [
         'id' => env('ADMITAD_SUBID', ''),
+        'base_url' => env('ADMITAD_BASE_URL', 'https://api.admitad.com'),
+        // Código de sitio para deeplinks manuales (fallback si no se usa API)
+        'codigo_sitio' => env('ADMITAD_CODIGO_SITIO', ''),
+        'verification_code' => env('ADMITAD_VERIFICATION_CODE', ''),
+        // API oficial: token y deeplink
+        'client_id' => env('ADMITAD_CLIENT_ID', ''),
+        'client_secret' => env('ADMITAD_CLIENT_SECRET', ''),
+        'base64_header' => env('ADMITAD_BASE64_HEADER', ''),
+        'website_id' => env('ADMITAD_WEBSITE_ID', ''),
+        'campaign_id' => env('ADMITAD_CAMPAIGN_ID', ''),
     ],
 
     'telegram' => [
         'token' => env('TELEGRAM_BOT_TOKEN'),
-        'chat_id' => env('TELEGRAM_CHAT_ID'),
-        'chat_id_free' => env('TELEGRAM_CHAT_ID_FREE'),
+        // Chat ID Free: canal principal. Fallback a TELEGRAM_CHAT_ID por compatibilidad.
+        'chat_id' => env('TELEGRAM_CHAT_ID_FREE') ?? env('TELEGRAM_CHAT_ID'),
         'chat_id_premium' => env('TELEGRAM_CHAT_ID_PREMIUM'),
-        'premium_join_url' => env('TELEGRAM_PREMIUM_JOIN_URL', ''),
-        // Límite de ofertas por tienda que se envían al canal Gratis en cada rastreo. Premium recibe todas. 0 = sin límite.
+        'unified_mode' => true,
+        // Límite de ofertas por tienda en cada rastreo. 0 = sin límite.
         'max_ofertas_por_rastreo' => (int) env('TELEGRAM_MAX_OFERTAS_POR_RASTREO', 0),
         // Segundos de espera entre cada oferta encolada (envío poco a poco; reduce timeouts y carga de Browsershot). Recomendado 15–30.
         'delay_entre_ofertas_segundos' => (int) env('TELEGRAM_DELAY_ENTRE_OFERTAS', 15),
@@ -64,6 +74,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | API externa de capturas (fallback cuando Browsershot/Chrome no está disponible)
+    |--------------------------------------------------------------------------
+    | Ej. ScreenshotLayer: CAPTURA_API_URL=https://api.screenshotlayer.com/api/capture, CAPTURA_API_KEY=tu_key
+    | La API debe aceptar GET con parámetro url= y devolver la imagen (PNG/JPEG). Si no se configura, se omite este fallback.
+    */
+    'captura_api' => [
+        'url' => env('CAPTURA_API_URL'),
+        'key' => env('CAPTURA_API_KEY'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Proxy Amazon (sesión distinta a ML para evitar bloqueos por IP compartida)
+    |--------------------------------------------------------------------------
+    | PROXY_URL_AMAZON: proxy dedicado (Smartproxy: usar sesión session-AmazonMX_Pro01). Si vacío, usa PROXY_URL.
+    */
+    'proxy_url_amazon' => env('PROXY_URL_AMAZON'),
+
+    /** Tag de afiliado Amazon para todos los enlaces (ej. micosmtics-20). */
+    'amazon_tag' => env('AMAZON_TAG', 'micosmtics-20'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Proxies por tienda (rastreo) – legacy; preferir PROXY_URL para todo
     |--------------------------------------------------------------------------
     */
@@ -78,7 +111,7 @@ return [
         'app_id' => env('ML_APP_ID'),
         'secret_key' => env('ML_SECRET_KEY'),
         'redirect_uri' => env('ML_REDIRECT_URI'),
-        'affiliate_id' => env('ML_AFFILIATE_ID'),
+        'affiliate_id' => env('ML_AFFILIATE_ID', '187001804'),
     ],
     'elektra' => [
         'proxy' => env('ELEKTRA_HTTP_PROXY'),

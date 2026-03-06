@@ -2,13 +2,17 @@
 
 namespace App\Console\Commands\Concerns;
 
+use App\Events\PrecioBajo;
 use App\Fabrica\RastreadorFabrica;
 use App\Jobs\EnviarOfertaTelegramJob;
 use App\Jobs\ProcesarBajadaDePrecioJob;
 use App\Models\Configuracion;
 use App\Models\HistorialPrecio;
 use App\Models\Producto;
+use App\Models\Tienda;
+use App\Services\AdmitadService;
 use App\Services\EstadoMotorService;
+use App\Services\NormalizadorEnlacesAfiliadoService;
 use App\Services\NotificadorTelegram;
 use Illuminate\Support\Facades\Log;
 
@@ -29,6 +33,7 @@ trait RastreoTiendaComando
     {
         $max = $options['max'] ?? null;
         $notificarTodos = $options['notificar_todos'] ?? false;
+        $minDiscount = (int) ($options['min_discount'] ?? 10);
 
         try {
             $motor = RastreadorFabrica::para($tiendaNombre);
@@ -36,6 +41,12 @@ trait RastreoTiendaComando
         } catch (\InvalidArgumentException $e) {
             $this->error($e->getMessage());
             return 1;
+        }
+
+        $tiendaModel = Tienda::query()->where('nombre', $tiendaOrigen)->first();
+        if ($tiendaModel !== null && ! $tiendaModel->activo) {
+            $this->warn("La tienda [{$tiendaOrigen}] está pausada en Administración → Tiendas. Actívala para rastrear.");
+            return 0;
         }
 
         if (app(EstadoMotorService::class)->estaBloqueado($tiendaOrigen)) {
@@ -53,7 +64,20 @@ trait RastreoTiendaComando
         }
 
         $this->info('Obteniendo ofertas de la tienda...');
-        $items = $motor->recolectarDatos();
+        try {
+            $items = $motor->recolectarDatos();
+        } catch (\Exception $e) {
+            Log::error('RastreoTiendaComando: fallo al recolectar datos del motor.', [
+                'tienda' => $tiendaOrigen,
+                'mensaje' => $e->getMessage(),
+                'excepcion' => get_class($e),
+            ]);
+            $this->error('No se pudo obtener las ofertas de la tienda.');
+            $this->line('Detalle: ' . $e->getMessage());
+            $this->warn('El comando finalizó sin actualizar la base de datos. Revisa la conexión (proxy, API) o los logs.');
+
+            return 1;
+        }
 
         if (empty($items)) {
             $this->warn('No se encontraron productos.');
@@ -107,16 +131,28 @@ trait RastreoTiendaComando
 
             $categoria = $item['categoria_origen'] ?? $exist?->categoria_origen;
             $permite = $exist?->permite_descuento_adicional ?? true;
+            // Mercado Libre: siempre permitir descuento adicional en rastreo para que el filtro no excluya ofertas.
+            if ($tiendaOrigen === 'Mercado Libre') {
+                $permite = true;
+            }
 
-            $urlOriginal = $item['url_original'] ?? null;
-            if ($tiendaOrigen === 'Calimax' && is_string($urlOriginal) && $urlOriginal !== '') {
-                $urlLower = strtolower($urlOriginal);
+            $urlCruda = $item['url_original'] ?? null;
+            if ($tiendaOrigen === 'Calimax' && is_string($urlCruda) && $urlCruda !== '') {
+                $urlLower = strtolower($urlCruda);
                 if (str_contains($urlLower, 'myvtex.com') || str_contains($urlLower, 'vtexcommercestable.com.br') || str_contains($urlLower, 'portal.')) {
-                    $urlOriginal = null;
+                    $urlCruda = null;
                 }
             }
 
+            // Fábrica de links: por tienda se genera la URL final de afiliado y se guarda en url_original (la que se envía a Telegram).
+            $urlOriginal = $this->aplicarFabricaEnlacesAfiliado($tiendaOrigen, $urlCruda);
+
+            $sinPrecio = $precioOriginal <= 0 && $precioOferta === null;
+            $noDisponible = is_string($item['nombre'] ?? '') && stripos($item['nombre'], 'No disponible') !== false;
+            $activo = ! $sinPrecio && ! $noDisponible;
+
             $rows[] = [
+                'tienda_id' => $tiendaModel?->id,
                 'tienda_origen' => $tiendaOrigen,
                 'sku_tienda' => $item['sku_tienda'],
                 'nombre' => $item['nombre'],
@@ -127,9 +163,11 @@ trait RastreoTiendaComando
                 'stock_disponible' => $item['stock_disponible'] ?? $exist?->stock_disponible ?? 0,
                 'ultima_actualizacion_precio' => $now,
                 'url_original' => $urlOriginal,
-                'url_afiliado' => $this->generarUrlAfiliado($urlOriginal ?? ''),
+                'url_afiliado' => null,
+                'affiliate_url' => $urlOriginal,
                 'categoria_origen' => $categoria,
                 'permite_descuento_adicional' => $permite,
+                'activo' => $activo,
                 'created_at' => $now,
                 'updated_at' => $now,
             ];
@@ -146,9 +184,9 @@ trait RastreoTiendaComando
 
         $this->info('Guardando productos en base de datos (bulk)...');
         Producto::upsert($rows, ['tienda_origen', 'sku_tienda'], [
-            'nombre', 'imagen_url', 'precio_original', 'precio_oferta', 'porcentaje_ahorro',
-            'stock_disponible', 'ultima_actualizacion_precio', 'url_original', 'url_afiliado',
-            'categoria_origen', 'permite_descuento_adicional', 'updated_at',
+            'tienda_id', 'nombre', 'imagen_url', 'precio_original', 'precio_oferta', 'porcentaje_ahorro',
+            'stock_disponible', 'ultima_actualizacion_precio', 'url_original', 'url_afiliado', 'affiliate_url',
+            'categoria_origen', 'permite_descuento_adicional', 'activo', 'updated_at',
         ]);
 
         $productosPorSku = Producto::query()
@@ -181,15 +219,16 @@ trait RastreoTiendaComando
 
         // Lógica de encolado:
         // - Solo productos con descuento real (precio_oferta < precio_original).
-        // - Mercado Libre: solo notificar si el descuento calculado es mayor al 15%.
+        // - Mercado Libre: solo notificar si el descuento es >= min_discount (por defecto 15%; --min-discount=N para cambiar).
         // - Si "Solo productos con descuento adicional" está activo, se excluyen permite_descuento_adicional = false.
-        // - Premium recibe todas las que pasen (0%+); Free según porcentaje mínimo.
+        // Todas las que pasen el filtro se encolan al canal principal.
         $query = Producto::query()
             ->where('tienda_origen', $tiendaOrigen)
+            ->where('activo', true)
             ->whereColumn('precio_oferta', '<', 'precio_original')
             ->whereNotNull('precio_oferta');
         if ($tiendaOrigen === 'Mercado Libre') {
-            $query->whereRaw('precio_original > 0 AND (1 - precio_oferta / precio_original) * 100 > 15');
+            $query->whereRaw('precio_original > 0 AND (1 - precio_oferta / precio_original) * 100 >= ?', [$minDiscount]);
         }
         if ($requiereDescuentoAdicional) {
             $query->where('permite_descuento_adicional', true);
@@ -206,15 +245,8 @@ trait RastreoTiendaComando
             }
         }
 
-        // Ordenar por mejor descuento primero. Premium recibe todos (0-100%+); Gratis solo 5-29.99%. Encolamos todos.
         $query->orderByDesc('porcentaje_ahorro');
         $productosParaTelegram = $query->get();
-        $maxOfertasGratis = (int) config('services.telegram.max_ofertas_por_rastreo', 0);
-        $cantidadGratis = $productosParaTelegram->filter(function (Producto $p) {
-            $porcentaje = (float) ($p->porcentaje_ahorro ?? 0);
-            return $porcentaje >= 5.0 && $porcentaje <= 29.99;
-        })->count();
-
         $encolados = $productosParaTelegram->count();
 
         $totalConDescuento = Producto::query()
@@ -222,19 +254,30 @@ trait RastreoTiendaComando
             ->whereColumn('precio_oferta', '<', 'precio_original')
             ->whereNotNull('precio_oferta')
             ->count();
-        if ($requiereDescuentoAdicional && $totalConDescuento > $encolados) {
+
+        $soloNovedadesSinCambios = ! $notificarTodos && empty(array_column($historialCandidates, 'sku_tienda'));
+        if ($soloNovedadesSinCambios && $encolados === 0 && $totalConDescuento > 0) {
+            $this->warn("Encolados: 0 (solo se encolan novedades con cambio de precio; este rastreo no tuvo cambios). Usa --notificar-todos para encolar todas las ofertas con descuento.");
+        } elseif ($requiereDescuentoAdicional && $totalConDescuento > $encolados && ! $soloNovedadesSinCambios) {
             $this->warn("Filtro activo: solo productos con 'permite descuento adicional'. Excluidos: " . ($totalConDescuento - $encolados) . " de {$totalConDescuento}. Desactívalo en Configuración → Notificaciones para enviar todas.");
         }
 
-        // Envío poco a poco unificado: una sola secuencia de delays para todas las tiendas (evita picos por tienda).
+        // Novedades (solo con cambio de precio): evento PrecioBajo → listeners monetizan y encolan. --notificar-todos: encolado directo.
         $delayInicial = (int) config('services.telegram.delay_inicial_ofertas_segundos', 10);
         $delayEntreOfertas = (int) config('services.telegram.delay_entre_ofertas_segundos', 15);
-        $cola = in_array($tiendaOrigen, ['Amazon', 'Mercado Libre'], true) ? 'high' : 'default';
-        foreach ($productosParaTelegram as $index => $producto) {
-            $delaySegundos = $delayInicial + (($delayOffsetGlobal + $index) * $delayEntreOfertas);
-            EnviarOfertaTelegramJob::dispatch($producto)
-                ->onQueue($cola)
-                ->delay(now()->addSeconds($delaySegundos));
+        if ($notificarTodos) {
+            $cola = in_array($tiendaOrigen, ['Amazon', 'Mercado Libre'], true) ? 'high' : 'default';
+            foreach ($productosParaTelegram as $index => $producto) {
+                $delaySegundos = $delayInicial + (($delayOffsetGlobal + $index) * $delayEntreOfertas);
+                EnviarOfertaTelegramJob::dispatch($producto)
+                    ->onQueue($cola)
+                    ->delay(now()->addSeconds($delaySegundos));
+            }
+        } else {
+            foreach ($productosParaTelegram as $index => $producto) {
+                $delaySegundos = $delayInicial + (($delayOffsetGlobal + $index) * $delayEntreOfertas);
+                event(new PrecioBajo($producto, $delaySegundos));
+            }
         }
         if ($encolados !== null) {
             $encolados = $productosParaTelegram->count();
@@ -253,26 +296,44 @@ trait RastreoTiendaComando
         $this->info('Procesados: ' . count($items) . ' productos.');
         $this->info('Registros en historial de precios: ' . count($historialInserts) . '.');
         $msgEncolados = $notificarTodos
-            ? 'Encolados para Telegram: ' . $encolados . ' (Premium 0-100%+; Gratis solo 5-29.99%, ' . $cantidadGratis . ' en rango).'
-            : 'Encolados para Telegram (solo novedades ≥' . $porcentajeMinimo . '%): ' . $encolados . ' (Premium 0-100%+; Gratis 5-29.99%, ' . $cantidadGratis . ' en rango).';
+            ? 'Encolados para Telegram: ' . $encolados . ' ofertas.'
+            : 'Encolados para Telegram (solo novedades ≥' . $porcentajeMinimo . '%): ' . $encolados . ' ofertas.';
         $this->info($msgEncolados);
         if ($encolados === 0 && count($items) > 0) {
-            $this->warn("Cero ofertas encoladas para [{$tiendaOrigen}]. Prueba con --notificar-todos o revisa Admin → Estado de motores (bloqueado).");
+            $this->warn("Cero ofertas encoladas para [{$tiendaOrigen}]. Para enviar todas las ofertas con descuento: php artisan rastreo:tienda \"{$tiendaOrigen}\" --notificar-todos");
         }
 
         return 0;
     }
 
-    protected function generarUrlAfiliado(string $urlOriginal): ?string
+    /**
+     * Fábrica de links por red de afiliados: devuelve la URL final que se guarda en url_original y se envía a Telegram.
+     * - Mercado Libre: normalizador (limpia rastreo ajeno, fuerza &micosmtics=187001804).
+     * - Amazon: normalizador (inyecta tag=micosmtics-20 al final).
+     * - Walmart, Sam's Club, Costco: Admitad deeplink (ulp=URL codificada).
+     * - Resto: URL sin modificar.
+     */
+    protected function aplicarFabricaEnlacesAfiliado(string $tiendaOrigen, ?string $urlCruda): ?string
     {
-        if ($urlOriginal === '') {
+        if ($urlCruda === null || $urlCruda === '') {
             return null;
         }
-        $idAdmitad = config('services.admitad.id', env('ADMITAD_SUBID', ''));
-        if ($idAdmitad === '') {
-            return $urlOriginal;
+
+        $normalizador = app(NormalizadorEnlacesAfiliadoService::class);
+
+        if ($tiendaOrigen === 'Mercado Libre' && str_contains($urlCruda, 'mercadolibre.com')) {
+            return $normalizador->normalizarUrlMercadoLibre($urlCruda);
         }
-        return $this->calculadoraOfertas->urlAfiliadoAdmitad($urlOriginal, $idAdmitad);
+
+        if ($tiendaOrigen === 'Amazon' && (str_contains($urlCruda, 'amazon.') || str_contains($urlCruda, 'amzn.'))) {
+            return $normalizador->normalizarUrlAmazon($urlCruda);
+        }
+
+        if (in_array($tiendaOrigen, ['Walmart', 'Sams Club', 'Costco'], true)) {
+            return app(AdmitadService::class)->generarDeeplink($urlCruda);
+        }
+
+        return $urlCruda;
     }
 
     protected function precioCambio(

@@ -2,6 +2,8 @@
 
 Para que las capturas de pantalla de ofertas y bajadas históricas funcionen en un servidor Linux (Ubuntu/Debian), instala Chromium (o Chrome) y las dependencias de sistema.
 
+**Si Chrome/Chromium no está instalado:** Browsershot fallará y en Telegram verás "(Captura no disponible)". El sistema intentará usar la **imagen del listado** (`imagen_url` del producto) cuando exista; si no, solo texto. Para tener capturas reales de la página del producto, instala Chromium y configura `BROWSERSHOT_CHROME_PATH` (ver sección 0).
+
 ## 0. Error "Could not find Chrome (ver. x.x)"
 
 Si en los logs aparece **"Could not find Chrome"** o **"cache path is incorrectly configured (/var/www/.cache/puppeteer)"**, Puppeteer no encuentra el navegador. La solución recomendada es usar **Chromium del sistema**:

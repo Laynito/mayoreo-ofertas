@@ -36,8 +36,8 @@ class MercadoLibreDiagnostico extends Command
 
     public function handle(): int
     {
-        $appId = config('services.mercado_libre.app_id');
-        $secret = config('services.mercado_libre.secret_key');
+        $appId = Configuracion::getMlAppId();
+        $secret = Configuracion::getMlSecretKey();
         $redirectUri = config('services.mercado_libre.redirect_uri');
 
         $this->info('--- Configuración Mercado Libre (OAuth) ---');
@@ -46,7 +46,7 @@ class MercadoLibreDiagnostico extends Command
         $this->line('ML_REDIRECT_URI: ' . ($redirectUri ?: '✗ vacío'));
 
         if (empty($appId) || empty($secret) || empty($redirectUri)) {
-            $this->error('Completa ML_APP_ID, ML_SECRET_KEY y ML_REDIRECT_URI en .env y ejecuta: php artisan config:clear');
+            $this->error('Completa ML (App ID, Secret) en Ajustes o .env y ML_REDIRECT_URI en .env. Luego: php artisan config:clear');
             return self::FAILURE;
         }
 
@@ -74,7 +74,7 @@ class MercadoLibreDiagnostico extends Command
 
         $this->newLine();
         $this->info('--- Prueba de API (SIN TOKEN, petición pública) ---');
-        $proxy = config('services.proxy_url');
+        $proxy = Configuracion::getProxyUrl();
         $headers = self::headersNavegador();
         $this->line($proxy ? 'Usando PROXY_URL. Cabeceras: Chrome User-Agent + Referer.' : 'Sin proxy. Cabeceras: Chrome User-Agent + Referer.');
         $this->line('No se envía Access Token ni Authorization.');
@@ -93,7 +93,7 @@ class MercadoLibreDiagnostico extends Command
             $total = is_array($resultados) ? count($resultados) : ($data['paging']['total'] ?? 0);
             $this->info('Respuesta: 200 OK. Resultados: ' . $total);
 
-            $affiliateId = config('services.mercado_libre.affiliate_id') ?: self::ID_AFILIADO;
+            $affiliateId = Configuracion::getMlAffiliateId() ?: self::ID_AFILIADO;
             $this->newLine();
             $this->info('--- Afiliado (micosmtics) ---');
             $this->line('ID configurado: ' . ($affiliateId ?: 'vacío (usando ' . self::ID_AFILIADO . ' para validación)'));

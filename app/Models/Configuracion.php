@@ -33,12 +33,38 @@ class Configuracion extends Model
     public const CLAVE_ML_REFRESH_TOKEN = 'mercado_libre_refresh_token';
     public const CLAVE_ML_EXPIRES_AT = 'mercado_libre_expires_at';
 
+    /** Configuración crítica (prioridad sobre .env; editables en Filament → Ajustes). */
+    public const CLAVE_TELEGRAM_TOKEN = 'telegram_token';
+    public const CLAVE_TELEGRAM_CHAT_ID = 'telegram_chat_id';
+    public const CLAVE_ML_APP_ID = 'ml_app_id';
+    public const CLAVE_ML_SECRET_KEY = 'ml_secret_key';
+    public const CLAVE_ML_AFFILIATE_ID = 'ml_affiliate_id';
+    public const CLAVE_AMAZON_TAG = 'amazon_tag';
+    public const CLAVE_PROXY_HABILITADO = 'proxy_habilitado';
+    public const CLAVE_PROXY_URL = 'proxy_url';
+    /** Chat ID Premium (ofertas con % alto). Opcional; si está vacío solo se usa Chat ID Free. */
+    public const CLAVE_TELEGRAM_CHAT_ID_PREMIUM = 'telegram_chat_id_premium';
+    /** Admitad: base URL y publisher ID (prioridad sobre .env). */
+    public const CLAVE_ADMITAD_BASE_URL = 'admitad_base_url';
+    public const CLAVE_ADMITAD_PUBLISHER_ID = 'admitad_publisher_id';
+
     /** Claves que usan caché (para limpiar todas de golpe). */
     public const CLAVES_CACHE = [
         self::CLAVE_PORCENTAJE_MINIMO,
         self::CLAVE_REQUIERE_DESCUENTO_ADICIONAL,
         self::CLAVE_PORCENTAJE_PREMIUM,
         self::CLAVE_ENVIAR_IMAGENES,
+        self::CLAVE_TELEGRAM_TOKEN,
+        self::CLAVE_TELEGRAM_CHAT_ID,
+        self::CLAVE_TELEGRAM_CHAT_ID_PREMIUM,
+        self::CLAVE_ML_APP_ID,
+        self::CLAVE_ML_SECRET_KEY,
+        self::CLAVE_ML_AFFILIATE_ID,
+        self::CLAVE_AMAZON_TAG,
+        self::CLAVE_PROXY_HABILITADO,
+        self::CLAVE_PROXY_URL,
+        self::CLAVE_ADMITAD_BASE_URL,
+        self::CLAVE_ADMITAD_PUBLISHER_ID,
     ];
 
     protected static function booted(): void
@@ -81,7 +107,11 @@ class Configuracion extends Model
         if ($valor === null || $valor === '') {
             return null;
         }
-        if ($clave === self::CLAVE_REQUIERE_DESCUENTO_ADICIONAL || $clave === self::CLAVE_ENVIAR_IMAGENES) {
+        if (in_array($clave, [
+            self::CLAVE_REQUIERE_DESCUENTO_ADICIONAL,
+            self::CLAVE_ENVIAR_IMAGENES,
+            self::CLAVE_PROXY_HABILITADO,
+        ], true)) {
             return in_array(strtolower($valor), ['1', 'true', 'yes', 'on'], true);
         }
         if ($clave === self::CLAVE_PORCENTAJE_MINIMO || $clave === self::CLAVE_PORCENTAJE_PREMIUM) {
@@ -130,5 +160,97 @@ class Configuracion extends Model
             Cache::forget(self::CACHE_TAG . '.' . $clave);
         }
         Cache::forget(self::CACHE_KEY_NOTIFICACIONES);
+    }
+
+    /** Token del bot de Telegram (BD tiene prioridad sobre .env). */
+    public static function getTelegramToken(): ?string
+    {
+        $v = self::obtener(self::CLAVE_TELEGRAM_TOKEN);
+        return $v !== null && $v !== '' ? (string) $v : config('services.telegram.token');
+    }
+
+    /** Chat ID Free de Telegram (BD tiene prioridad sobre .env). */
+    public static function getTelegramChatId(): ?string
+    {
+        $v = self::obtener(self::CLAVE_TELEGRAM_CHAT_ID);
+        return $v !== null && $v !== '' ? (string) $v : config('services.telegram.chat_id');
+    }
+
+    /** Chat ID Premium de Telegram (solo ofertas con % ≥ porcentaje premium). Opcional. */
+    public static function getTelegramChatIdPremium(): ?string
+    {
+        $v = self::obtener(self::CLAVE_TELEGRAM_CHAT_ID_PREMIUM);
+        if ($v !== null && $v !== '') {
+            return (string) $v;
+        }
+        $env = config('services.telegram.chat_id_premium');
+        return $env !== null && $env !== '' ? (string) $env : null;
+    }
+
+    /** App ID de Mercado Libre (BD prioridad sobre .env). */
+    public static function getMlAppId(): ?string
+    {
+        $v = self::obtener(self::CLAVE_ML_APP_ID);
+        return $v !== null && $v !== '' ? (string) $v : config('services.mercado_libre.app_id');
+    }
+
+    /** Secret Key de Mercado Libre (BD prioridad sobre .env). */
+    public static function getMlSecretKey(): ?string
+    {
+        $v = self::obtener(self::CLAVE_ML_SECRET_KEY);
+        return $v !== null && $v !== '' ? (string) $v : config('services.mercado_libre.secret_key');
+    }
+
+    /** ID de afiliado Mercado Libre (ej. 187001804). BD prioridad sobre .env. */
+    public static function getMlAffiliateId(): ?string
+    {
+        $v = self::obtener(self::CLAVE_ML_AFFILIATE_ID);
+        return $v !== null && $v !== '' ? (string) $v : config('services.mercado_libre.affiliate_id');
+    }
+
+    /** Tag de afiliado Amazon (ej. micosmtics-20). BD prioridad sobre .env. */
+    public static function getAmazonTag(): ?string
+    {
+        $v = self::obtener(self::CLAVE_AMAZON_TAG);
+        return $v !== null && $v !== '' ? (string) $v : config('services.amazon_tag');
+    }
+
+    /** Si el proxy global está habilitado (switch en Ajustes). Por defecto true si PROXY_URL está definido en .env. */
+    public static function isProxyHabilitado(): bool
+    {
+        $v = self::obtener(self::CLAVE_PROXY_HABILITADO);
+        if ($v !== null) {
+            return (bool) $v;
+        }
+        $envUrl = config('services.proxy_url');
+        return $envUrl !== null && $envUrl !== '';
+    }
+
+    /** URL del proxy global (solo si proxy está habilitado). Prioridad: BD (Centro de Control) → .env. */
+    public static function getProxyUrl(): ?string
+    {
+        if (! self::isProxyHabilitado()) {
+            return null;
+        }
+        $v = self::obtener(self::CLAVE_PROXY_URL);
+        if ($v !== null && $v !== '') {
+            return (string) $v;
+        }
+        $url = config('services.proxy_url');
+        return $url !== null && $url !== '' ? $url : null;
+    }
+
+    /** Base URL Admitad (BD prioridad sobre .env). */
+    public static function getAdmitadBaseUrl(): ?string
+    {
+        $v = self::obtener(self::CLAVE_ADMITAD_BASE_URL);
+        return $v !== null && $v !== '' ? (string) $v : config('services.admitad.base_url');
+    }
+
+    /** Publisher ID Admitad (BD prioridad sobre .env). */
+    public static function getAdmitadPublisherId(): ?string
+    {
+        $v = self::obtener(self::CLAVE_ADMITAD_PUBLISHER_ID);
+        return $v !== null && $v !== '' ? (string) $v : (config('services.admitad.website_id') ?? config('services.admitad.id'));
     }
 }

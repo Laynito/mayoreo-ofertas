@@ -2,7 +2,11 @@
 
 use App\Http\Controllers\MercadoLibreAuthController;
 use App\Http\Controllers\MercadoLibreNotificationsController;
+use App\Http\Controllers\RedirectController;
 use Illuminate\Support\Facades\Route;
+
+// Redirección de clics: guarda evento en DB y redirige al enlace de Admitad (mayoreo.cloud/r/{codigo})
+Route::get('/r/{codigo}', [RedirectController::class, 'show'])->name('redirect.show');
 
 Route::get('/', function () {
     return view('ofertas');
@@ -13,6 +17,7 @@ Route::get('/mercado-libre/login', [MercadoLibreAuthController::class, 'login'])
 Route::get('/mercado-libre/callback', [MercadoLibreAuthController::class, 'callback'])->name('mercado-libre.callback');
 
 // Notificaciones de Mercado Libre (webhook). Configurar en panel ML: https://mayoreo.cloud/api/mercado-libre/notifications
+Route::get('/api/mercado-libre/notifications', [MercadoLibreNotificationsController::class, 'show'])->name('mercado-libre.notifications.get');
 Route::post('/api/mercado-libre/notifications', [MercadoLibreNotificationsController::class, 'handle'])->name('mercado-libre.notifications');
 
 Route::get('/welcome', function () {

@@ -3,30 +3,27 @@
 namespace App\Motores;
 
 use App\Support\HttpRastreador;
-use GuzzleHttp\Cookie\CookieJar;
+use DOMDocument;
+use DOMXPath;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Costco México.
- * Estrategia: intentar API de búsqueda primero (verificar URL en network log del navegador); fallback a HTML.
+ * Estrategia: solo scraping web (página pública de ofertas). Sin APIs internas (evita 403 Akamai/SSL).
+ * Usa HttpRastreador::getCachedOrFetch y conProxySiTexto. Referer = home de la tienda.
+ * Estructura preparada para inyección de afiliados: URLs limpias en url_original (normalizarUrlPublicaCostco).
  */
 class CostcoMotor extends BaseMotorRastreador
 {
     protected const URL_BASE = 'https://www.costco.com.mx';
 
-    /**
-     * Posible endpoint de búsqueda (confirmar en pestaña Network al cargar ofertas).
-     * Si devuelve 404 o no JSON, se usa el fallback HTML.
-     */
-    protected const API_SEARCH = '/api/v1/search';
+    /** Página pública de ofertas (evita /api/v1/search que devuelve 403). */
+    private const URL_OFERTAS = 'https://www.costco.com.mx/ofertas';
 
-    /** Sección de liquidaciones/ofertas (sin barra final). */
-    protected const RUTA_OFERTAS = 'c/ofertas';
+    private const URL_OFERTAS_ALT = 'https://www.costco.com.mx/c/ofertas';
 
-    protected const RUTA_OFERTAS_ALT = 'treasure-hunt';
-
-    protected ?CookieJar $cookieJar = null;
+    private const URL_TREASURE_HUNT = 'https://www.costco.com.mx/treasure-hunt';
 
     protected function getUrlBase(): string
     {
@@ -35,163 +32,57 @@ class CostcoMotor extends BaseMotorRastreador
 
     protected function getRutaOfertas(): string
     {
-        return self::RUTA_OFERTAS;
+        return 'ofertas';
     }
 
     /**
-     * Headers de validación para peticiones a la API (evitar bloqueo/Captcha).
-     *
-     * @return array<string, mixed>
-     */
-    protected function getOpcionesPeticion(string $url): array
-    {
-        if (! str_contains($url, '/api/')) {
-            return [];
-        }
-        return [
-            'headers' => [
-                'Accept' => 'application/json',
-                'Content-Type' => 'application/json',
-                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
-                'X-Requested-With' => 'XMLHttpRequest',
-                'Origin' => 'https://www.costco.com.mx',
-            ],
-        ];
-    }
-
-    /**
-     * Peticiones con CookieJar para persistir sesión (Home + ofertas). Usa Http de Laravel y PROXY_URL si está definida.
-     *
-     * @return array{body: string, status: int}|null
-     */
-    protected function realizarPeticion(string $url): ?array
-    {
-        $this->pausarEntrePeticiones();
-
-        if ($this->cookieJar === null) {
-            $this->cookieJar = new CookieJar;
-        }
-
-        $cabeceras = $this->obtenerCabecerasNavegador($this->getUrlBase());
-        $opciones = $this->getOpcionesPeticion($url);
-        if (isset($opciones['headers']) && is_array($opciones['headers'])) {
-            $cabeceras = array_merge($cabeceras, $opciones['headers']);
-        }
-
-        $request = Http::withHeaders($cabeceras)
-            ->withOptions(['cookies' => $this->cookieJar])
-            ->timeout(15)
-            ->connectTimeout(10);
-        $request = HttpRastreador::conProxySiTexto($request, $url);
-
-        try {
-            $respuesta = $request->get($url);
-            $this->peticionesRealizadas++;
-
-            return [
-                'body' => $respuesta->body(),
-                'status' => $respuesta->status(),
-            ];
-        } catch (\Throwable $e) {
-            Log::warning(static::class . ': error en petición', ['url' => $url, 'mensaje' => $e->getMessage()]);
-
-            return null;
-        }
-    }
-
-    /**
-     * Primero intenta la API de búsqueda; si no hay JSON válido o no hay datos, fallback a página de ofertas (HTML).
+     * Recolecta solo desde página web pública (getCachedOrFetch + conProxySiTexto). Sin API.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     public function recolectarDatos(): array
     {
-        $this->peticionesRealizadas = 0;
-        $base = rtrim($this->getUrlBase(), '/');
+        $headers = HttpRastreador::headersSoloHtmlConRefererTienda(self::URL_BASE);
 
-        $homeUrl = $base . '/';
-        $this->realizarPeticion($homeUrl);
+        $urls = [self::URL_OFERTAS, self::URL_OFERTAS_ALT, self::URL_TREASURE_HUNT];
+        foreach ($urls as $url) {
+            try {
+                $resultado = HttpRastreador::getCachedOrFetch($url, function () use ($url, $headers): array {
+                    $request = Http::withHeaders($headers)->timeout(60)->connectTimeout(30)
+                        ->withOptions(HttpRastreador::opcionesSslBase());
+                    $request = HttpRastreador::conProxySiTexto($request, $url);
+                    $respuesta = $request->get($url);
 
-        $urlApi = $base . self::API_SEARCH . '?keyword=ofertas';
-        $resultadoApi = $this->realizarPeticion($urlApi);
+                    return ['body' => $respuesta->body(), 'status' => $respuesta->status()];
+                }, HttpRastreador::CACHE_PROXY_TTL);
 
-        if ($resultadoApi !== null && ($resultadoApi['status'] === 401 || $resultadoApi['status'] === 403)) {
-            Log::error('API Bloqueada', ['cuerpo' => $resultadoApi['body'], 'url' => $urlApi, 'status' => $resultadoApi['status']]);
-        }
+                if ($resultado['status'] < 200 || $resultado['status'] >= 300) {
+                    if ($resultado['status'] === 403) {
+                        Log::debug('CostcoMotor: 403 en URL', ['url' => $url]);
+                    }
+                    continue;
+                }
 
-        if ($resultadoApi !== null && $resultadoApi['status'] === 200) {
-            $body = $resultadoApi['body'];
-            $data = json_decode($body, true);
-            if (! is_array($data) && $body !== '') {
-                Log::warning('CostcoMotor: respuesta API no es JSON (posible Captcha).', [
-                    'inicio_respuesta' => mb_substr($body, 0, 500),
-                    'url' => $urlApi,
-                ]);
-            }
-            if (is_array($data)) {
-                $productos = $this->extraerDesdeApiSearch($data);
+                $productos = $this->extraerProductosDeRespuesta($resultado['body'], $url);
+                if (empty($productos)) {
+                    $productos = $this->extraerProductosDesdeHtml($resultado['body'], $url);
+                }
                 if (! empty($productos)) {
-                    Log::info(static::class . ': productos obtenidos vía API', ['total' => count($productos)]);
+                    Log::info('CostcoMotor: productos desde página web', ['cantidad' => count($productos), 'url' => $url]);
+
                     return $productos;
                 }
+            } catch (\Throwable $e) {
+                Log::warning('CostcoMotor: error en petición', ['url' => $url, 'mensaje' => $e->getMessage()]);
             }
         }
 
-        $urlOfertas = $base . '/' . ltrim($this->getRutaOfertas(), '/');
-        $resultado = $this->realizarPeticion($urlOfertas);
-        if ($resultado === null) {
-            Log::info(static::class . ': sin respuesta ofertas', ['url' => $urlOfertas]);
-            return [];
-        }
-        if ($resultado['status'] === 404) {
-            $urlAlt = $base . '/' . ltrim(self::RUTA_OFERTAS_ALT, '/');
-            $resultado = $this->realizarPeticion($urlAlt);
-            if ($resultado === null || $resultado['status'] !== 200) {
-                Log::info(static::class . ': 404 en c/ofertas y fallo en alternate', ['url_alt' => $urlAlt]);
-                return [];
-            }
-            $urlOfertas = $urlAlt;
-        } elseif ($resultado['status'] !== 200) {
-            Log::info(static::class . ': respuesta no 200', ['url' => $urlOfertas, 'status' => $resultado['status']]);
-        }
-
-        $productos = $this->extraerProductosDeRespuesta($resultado['body'], $urlOfertas);
-        if (empty($productos)) {
-            Log::warning('CostcoMotor: no se extrajeron productos.', [
-                'url' => $urlOfertas,
-                'status' => $resultado['status'],
-                'interpretacion' => $resultado['status'] === 403 ? 'posible bloqueo (403)' : 'cambio de estructura',
-            ]);
-        }
-        return $productos;
+        return [];
     }
 
     /**
-     * Extrae productos del JSON de la API de búsqueda (estructura a confirmar con network log).
+     * Extracción: __NEXT_DATA__ y __PRELOADED_STATE__.
      *
-     * @param  array<string, mixed>  $data
-     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
-     */
-    protected function extraerDesdeApiSearch(array $data): array
-    {
-        $items = $data['products'] ?? $data['items'] ?? $data['results'] ?? $data['data'] ?? [];
-        if (! is_array($items)) {
-            return [];
-        }
-        $productos = [];
-        foreach (array_slice($items, 0, 50) as $item) {
-            if (! is_array($item)) {
-                continue;
-            }
-            $m = $this->normalizarItem($item);
-            if ($m !== null) {
-                $productos[] = $m;
-            }
-        }
-        return $productos;
-    }
-
-    /**
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     protected function extraerProductosDeRespuesta(string $body, string $urlPagina): array
@@ -209,12 +100,136 @@ class CostcoMotor extends BaseMotorRastreador
                 $productos = $this->mapearDesdePreloadedState($data);
             }
         }
+        if (empty($productos)) {
+            Log::debug('CostcoMotor: no se extrajeron productos desde __NEXT_DATA__/__PRELOADED_STATE__', ['url' => $urlPagina]);
+        }
+
         return $productos;
     }
 
     /**
-     * Extrae lista de productos desde __NEXT_DATA__. Prueba varias rutas (Costco puede cambiar estructura).
+     * Fallback: extracción desde DOM (.product-item, .product-list-item).
      *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function extraerProductosDesdeHtml(string $body, string $urlPagina): array
+    {
+        $productos = [];
+        libxml_use_internal_errors(true);
+        $dom = new DOMDocument;
+        if (! @$dom->loadHTML('<?xml encoding="UTF-8">' . $body, LIBXML_NOERROR)) {
+            libxml_clear_errors();
+
+            return [];
+        }
+        $xpath = new DOMXPath($dom);
+
+        $contenedores = $xpath->query("//*[contains(@class, 'product-item') or contains(@class, 'product-list-item') or contains(@class, 'productTile')]");
+        if ($contenedores === false || $contenedores->length === 0) {
+            $contenedores = $xpath->query("//*[contains(@class, 'product') and .//a[@href]]");
+        }
+        if ($contenedores === false || $contenedores->length === 0) {
+            libxml_clear_errors();
+
+            return [];
+        }
+
+        foreach ($contenedores as $nodo) {
+            if (! $nodo instanceof \DOMElement) {
+                continue;
+            }
+            $nombre = $this->extraerTexto($xpath, $nodo, './/*[contains(@class, "title") or contains(@class, "name") or contains(@class, "description")]');
+            if ($nombre === '') {
+                $nombre = $this->extraerTexto($xpath, $nodo, './/a');
+            }
+            $enlace = $this->extraerHref($xpath, $nodo, './/a[contains(@href, "costco.com.mx")]');
+            $precioTexto = $this->extraerTexto($xpath, $nodo, './/*[contains(@class, "price")]');
+            $precioOferta = $this->parsearPrecio($precioTexto);
+            $precioOriginal = $precioOferta;
+            $imagenUrl = $this->extraerSrc($xpath, $nodo, './/img[@src]');
+
+            if ($nombre === '' && $enlace === '') {
+                continue;
+            }
+
+            $urlOriginal = $this->normalizarUrlPublicaCostco($enlace !== '' ? (str_starts_with($enlace, 'http') ? $enlace : self::URL_BASE . '/' . ltrim($enlace, '/')) : null);
+            $skuTienda = 'COS-' . substr(md5($nombre ?: $enlace ?: uniqid('', true)), 0, 12);
+
+            $productos[] = [
+                'sku_tienda' => $skuTienda,
+                'nombre' => $nombre ?: 'Producto Costco',
+                'precio_original' => round($precioOriginal, 2),
+                'precio_oferta' => $precioOferta > 0 ? round($precioOferta, 2) : null,
+                'imagen_url' => $imagenUrl !== '' ? $imagenUrl : null,
+                'url_original' => $urlOriginal,
+            ];
+        }
+        libxml_clear_errors();
+
+        return array_slice($productos, 0, 50);
+    }
+
+    private function extraerTexto(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
+    {
+        $nodes = $xpath->query($expr, $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $t = $nodes->item(0)->textContent ?? '';
+
+        return trim(preg_replace('/\s+/', ' ', $t));
+    }
+
+    private function extraerHref(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
+    {
+        $nodes = $xpath->query($expr, $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $el = $nodes->item(0);
+
+        return $el instanceof \DOMElement ? trim($el->getAttribute('href') ?? '') : '';
+    }
+
+    private function extraerSrc(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
+    {
+        $nodes = $xpath->query($expr, $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $el = $nodes->item(0);
+
+        return $el instanceof \DOMElement ? trim($el->getAttribute('src') ?? '') : '';
+    }
+
+    private function parsearPrecio(string $texto): float
+    {
+        if (preg_match('/[\d,]+\.?\d*/', $texto, $m)) {
+            return (float) str_replace(',', '', $m[0]);
+        }
+
+        return 0.0;
+    }
+
+    /**
+     * URLs públicas para auditoría; preparado para inyección de afiliado (impact/awin).
+     */
+    protected function normalizarUrlPublicaCostco(?string $url): ?string
+    {
+        if ($url === null || $url === '') {
+            return null;
+        }
+        if (str_contains($url, '/api/') || str_contains($url, 'myvtex.com')) {
+            return null;
+        }
+        if (! str_starts_with($url, 'http')) {
+            $url = self::URL_BASE . '/' . ltrim($url, '/');
+        }
+
+        return str_starts_with($url, 'https://www.costco.com.mx') ? $url : null;
+    }
+
+    /**
      * @param  array<string, mixed>  $data
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -239,10 +254,6 @@ class CostcoMotor extends BaseMotorRastreador
             $items = $this->buscarListaProductosEnArray($data);
         }
         if (! is_array($items) || empty($items)) {
-            Log::debug('CostcoMotor: __NEXT_DATA__ sin productos; claves pageProps', [
-                'url' => $urlPagina,
-                'pageProps_keys' => is_array($props) ? array_keys($props) : [],
-            ]);
             return [];
         }
         $productos = [];
@@ -260,8 +271,6 @@ class CostcoMotor extends BaseMotorRastreador
     }
 
     /**
-     * Busca recursivamente un array de productos/items en la estructura JSON (máximo 4 niveles).
-     *
      * @param  array<string, mixed>  $data
      * @return array<int, array<string, mixed>>|null
      */
@@ -278,6 +287,7 @@ class CostcoMotor extends BaseMotorRastreador
             if (! is_array($first)) {
                 return false;
             }
+
             return isset($first['name'], $first['price'])
                 || isset($first['title'], $first['price'])
                 || isset($first['productName'], $first['salePrice'])
@@ -295,12 +305,11 @@ class CostcoMotor extends BaseMotorRastreador
                 return $found;
             }
         }
+
         return null;
     }
 
     /**
-     * Fallback: extracción desde window.__PRELOADED_STATE__ si existe.
-     *
      * @param  array<string, mixed>  $data
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -320,12 +329,11 @@ class CostcoMotor extends BaseMotorRastreador
                 $productos[] = $m;
             }
         }
+
         return $productos;
     }
 
     /**
-     * Normaliza un ítem de producto (API o __NEXT_DATA__). Acepta variantes de nombres de campo.
-     *
      * @param  array<string, mixed>  $item
      * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
      */
@@ -357,22 +365,5 @@ class CostcoMotor extends BaseMotorRastreador
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
             'url_original' => $urlOriginal,
         ];
-    }
-
-    /**
-     * Asegura que la URL apunte a la tienda pública (costco.com.mx), no a APIs internas.
-     */
-    protected function normalizarUrlPublicaCostco(?string $url): ?string
-    {
-        if ($url === null || $url === '') {
-            return null;
-        }
-        if (str_contains($url, '/api/') || str_contains($url, 'myvtex.com')) {
-            return null;
-        }
-        if (! str_starts_with($url, 'http')) {
-            $url = self::URL_BASE . '/' . ltrim($url, '/');
-        }
-        return str_starts_with($url, 'https://www.costco.com.mx') ? $url : null;
     }
 }

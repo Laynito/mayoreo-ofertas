@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Exceptions\TelegramRateLimitException;
 use App\Models\Configuracion;
+use App\Models\NotificacionLog;
 use App\Models\Producto;
 use App\Models\TelegramMensajeOferta;
 use Illuminate\Http\Client\Response;
@@ -16,13 +17,68 @@ use Spatie\Browsershot\Exceptions\CouldNotTakeBrowsershot;
 use Symfony\Component\Process\Exception\ProcessTimedOutException;
 
 /**
- * Notificador de ofertas vía Telegram (Free y Premium).
- * Las ofertas se envían con captura de pantalla (Browsershot) de la página del producto, no con imagen del CDN.
- * Si la captura falla, se envía solo texto. Bajada histórica (≥30%) también usa Browsershot.
+ * Notificador de ofertas vía Telegram. Un solo canal (TELEGRAM_CHAT_ID).
+ * Prioridad: que la notificación nunca deje de salir.
+ * Orden de imagen: 1) Browsershot (si Chrome está disponible), 2) API externa de capturas (opcional), 3) Imagen del producto (motor), 4) Solo texto.
  * Toggle enviar_imagenes: si está desactivado, se envía solo texto.
  */
 class NotificadorTelegram
 {
+    public function __construct(
+        private readonly AffiliateLinkService $affiliateLinkService,
+        private readonly RedirectLinkService $redirectLinkService,
+        private readonly MercadoLibreShortUrlService $mercadoLibreShortUrlService
+    ) {}
+
+    /**
+     * URL para el botón "Ver en Tienda": mayoreo.cloud/r/{codigo}. Para Mercado Libre intenta meli.la (API short_urls); si falla, usa URL larga con micosmtics.
+     */
+    private function urlParaBotonVerEnTienda(Producto $producto, string $canal = 'Mayoreo_Cloud_Bot'): ?string
+    {
+        $urlDestino = null;
+        if (! empty($producto->url_afiliado) && str_starts_with($producto->url_afiliado, 'http')) {
+            $urlDestino = $producto->url_afiliado;
+        } else {
+            $base = $producto->url_original ?? $producto->affiliate_url;
+            if ($base !== null && $base !== '' && str_starts_with($base, 'http')) {
+                $urlDestino = $this->affiliateLinkService->enlaceParaTelegram($base, $producto->tienda_origen ?? '', $canal);
+            }
+        }
+
+        if (trim($producto->tienda_origen ?? '') === 'Mercado Libre' && $urlDestino !== null && str_contains($urlDestino, 'mercadolibre.com')) {
+            $short = $this->mercadoLibreShortUrlService->acortar($urlDestino);
+            if ($short !== null && $short !== '') {
+                $urlDestino = $short;
+            }
+        }
+
+        if ($urlDestino === null || $urlDestino === '') {
+            return null;
+        }
+        return $this->redirectLinkService->crear($urlDestino, $canal);
+    }
+
+    /**
+     * Para productos de Mercado Libre: URL a mostrar (meli.la o larga) e Item ID para el mensaje. Fallback automático a URL larga si la API falla.
+     *
+     * @return array{url_display: string, item_id: string}|null
+     */
+    private function obtenerDatosEnlaceMercadoLibre(Producto $producto): ?array
+    {
+        if (trim($producto->tienda_origen ?? '') !== 'Mercado Libre') {
+            return null;
+        }
+        $urlLarga = $producto->url_original ?? $producto->affiliate_url ?? '';
+        if ($urlLarga === '' || ! str_starts_with($urlLarga, 'http')) {
+            return null;
+        }
+        $short = $this->mercadoLibreShortUrlService->acortar($urlLarga);
+        $urlDisplay = ($short !== null && $short !== '') ? $short : $urlLarga;
+        $itemId = MercadoLibreShortUrlService::extraerItemId($urlLarga, $producto->sku_tienda) ?? '';
+
+        return ['url_display' => $urlDisplay, 'item_id' => $itemId];
+    }
+
     /**
      * Si la respuesta de la API de Telegram es 429 Too Many Requests, lanza excepción para que el Job reintente con release(30).
      */
@@ -33,71 +89,45 @@ class NotificadorTelegram
         }
     }
 
-    /** Rango Gratis: solo ofertas entre este % y GRATIS_PORCENTAJE_MAX (inclusive) se envían al canal Gratis. */
-    private const GRATIS_PORCENTAJE_MIN = 5.0;
-
-    /** Rango Gratis: ofertas entre GRATIS_PORCENTAJE_MIN y este % (inclusive) se envían al canal Gratis. */
-    private const GRATIS_PORCENTAJE_MAX = 29.99;
-
     /**
-     * Devuelve a qué canales enviar la oferta según el % de ahorro.
-     * Premium: 0% a 100%+ (todos los descuentos que notificamos).
-     * Gratis: solo 5% a 29.99%.
-     * Cada elemento es ['chat_id' => string, 'caption' => string] para usar la misma captura con caption por canal.
+     * Devuelve destinos: Chat Free siempre (si está configurado); Chat Premium si % ≥ umbral y está configurado.
+     * Cada elemento es ['chat_id' => string, 'caption' => string].
      *
      * @return array<int, array{chat_id: string, caption: string}>
      */
     private function destinosParaOferta(Producto $producto, float $porcentaje, bool $soloTexto = false): array
     {
-        $chatPremium = config('services.telegram.chat_id_premium');
-        $chatFree = config('services.telegram.chat_id_free');
-        $chatFallback = config('services.telegram.chat_id');
-
+        $datosMl = $this->obtenerDatosEnlaceMercadoLibre($producto);
+        $caption = $this->construirCaption($producto, $porcentaje, $soloTexto, $datosMl);
         $destinos = [];
-
-        if ((string) $chatPremium !== '') {
-            $captionPremium = $this->construirCaption($producto, $porcentaje, true, $soloTexto);
-            $destinos[] = ['chat_id' => (string) $chatPremium, 'caption' => $captionPremium];
-        } elseif ((string) $chatFree === '' && (string) $chatFallback !== '') {
-            $captionPremium = $this->construirCaption($producto, $porcentaje, true, $soloTexto);
-            $destinos[] = ['chat_id' => (string) $chatFallback, 'caption' => $captionPremium];
+        $chatFree = Configuracion::getTelegramChatId();
+        if ($chatFree !== null && (string) $chatFree !== '') {
+            $destinos[] = ['chat_id' => (string) $chatFree, 'caption' => $caption];
         }
-
-        if ($porcentaje >= self::GRATIS_PORCENTAJE_MIN && $porcentaje <= self::GRATIS_PORCENTAJE_MAX && (string) $chatFree !== '') {
-            $captionGratis = $this->construirCaption($producto, $porcentaje, false, $soloTexto);
-            $destinos[] = ['chat_id' => (string) $chatFree, 'caption' => $captionGratis];
+        $umbralPremium = Configuracion::porcentajeMinimoParaPremium();
+        $chatPremium = Configuracion::getTelegramChatIdPremium();
+        if ($porcentaje >= $umbralPremium && $chatPremium !== null && (string) $chatPremium !== '' && (string) $chatPremium !== (string) $chatFree) {
+            $destinos[] = ['chat_id' => (string) $chatPremium, 'caption' => $caption];
         }
-
         return $destinos;
     }
 
-    /** Indica si la oferta se considera "bomba" (≥ 30%) para enviar teaser al canal Free. */
-    private function esOfertaBomba(float $porcentajeAhorro): bool
-    {
-        return $porcentajeAhorro >= 30.0;
-    }
-
-    /** Para bajada histórica: ≥30% → Premium; 10-29.9% → Gratis; <10% no se envía. */
+    /** Para bajada histórica: canal único (TELEGRAM_CHAT_ID) si bajada ≥ 10%. */
     private function chatIdParaBajadaHistorica(float $porcentajeBajada): ?string
     {
-        if ($porcentajeBajada >= 30.0) {
-            $chat = config('services.telegram.chat_id_premium');
-            return $chat !== null && (string) $chat !== '' ? (string) $chat : null;
+        if ($porcentajeBajada < 10.0) {
+            return null;
         }
-        if ($porcentajeBajada >= 10.0 && $porcentajeBajada < 30.0) {
-            $chat = config('services.telegram.chat_id_free');
-            return $chat !== null && (string) $chat !== '' ? (string) $chat : null;
-        }
-        return null;
+        $chat = Configuracion::getTelegramChatId();
+        return $chat !== null && (string) $chat !== '' ? (string) $chat : null;
     }
 
     /** Horas durante las cuales no se reenvía la misma oferta (producto + precio) a Telegram. */
     private const HORAS_ANTES_REENVIAR_OFERTA = 12;
 
     /**
-     * Notifica una oferta: captura de pantalla (Browsershot) de la página del producto y la envía al canal
-     * que corresponda (Premium o Gratis). Si la captura falla, se envía solo texto. No se usa imagen del CDN.
-     * Evita duplicados: la misma oferta (producto + precio oferta) no se envía de nuevo en HORAS_ANTES_REENVIAR_OFERTA.
+     * Notifica una oferta: captura de pantalla (Browsershot) de la página del producto al canal principal.
+     * Si la captura falla, se envía solo texto. Evita duplicados en HORAS_ANTES_REENVIAR_OFERTA.
      */
     public function notificarOferta(Producto $producto): void
     {
@@ -105,15 +135,17 @@ class NotificadorTelegram
         $requiereAdicional = Configuracion::requiereDescuentoAdicional();
 
         if ($requiereAdicional && ! $producto->permite_descuento_adicional) {
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Producto no permite descuento adicional', null);
             return;
         }
 
         $destinos = $this->destinosParaOferta($producto, $porcentaje);
         if ($destinos === []) {
-            Log::warning('NotificadorTelegram: oferta NO enviada; ningún canal configurado. Revisa TELEGRAM_CHAT_ID_PREMIUM y TELEGRAM_CHAT_ID_FREE en .env y ejecuta telegram:verificar.', [
+            Log::warning('NotificadorTelegram: oferta NO enviada; ningún canal configurado. Revisa TELEGRAM_CHAT_ID en .env y ejecuta telegram:verificar.', [
                 'producto_id' => $producto->id,
                 'sku_tienda' => $producto->sku_tienda,
             ]);
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Ningún canal configurado (Chat ID)', null);
             return;
         }
 
@@ -123,18 +155,24 @@ class NotificadorTelegram
                 'producto_id' => $producto->id,
                 'sku_tienda' => $producto->sku_tienda,
             ]);
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Ya enviado recientemente (duplicado)', null);
+            return;
+        }
+
+        $token = Configuracion::getTelegramToken();
+        if (empty($token)) {
+            Log::debug('NotificadorTelegram: TELEGRAM_BOT_TOKEN no configurado.');
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Bot Token no configurado', null);
             return;
         }
 
         if (! Configuracion::enviarImagenes()) {
+            $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
             $this->enviarOfertaSoloTextoADestinos($producto, $porcentaje, $destinos);
+            foreach ($destinos as $destino) {
+                NotificacionLog::registrar($producto->id, $producto->tienda_origen, $destino['chat_id'], NotificacionLog::ESTADO_ENVIADO, null, $urlAfiliado);
+            }
             Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
-            return;
-        }
-
-        $token = config('services.telegram.token');
-        if (empty($token)) {
-            Log::debug('NotificadorTelegram: TELEGRAM_BOT_TOKEN no configurado.');
             return;
         }
 
@@ -145,15 +183,14 @@ class NotificadorTelegram
             'destinos' => count($destinos),
         ]);
 
-        $urlAfiliado = $producto->url_afiliado_completa ?? $producto->url_original;
+        $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
         $this->enviarConCapturaOFallbackADestinos($token, $destinos, $producto, $urlAfiliado, 'NotificadorTelegram: producto sin URL para captura de oferta');
 
-        // No lanzar después de enviar: evita que el Job reenvíe con enviarOfertaSoloTexto (doble mensaje).
+        foreach ($destinos as $destino) {
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, $destino['chat_id'], NotificacionLog::ESTADO_ENVIADO, null, $urlAfiliado);
+        }
         try {
             Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
-            if ($this->esOfertaBomba($porcentaje)) {
-                $this->enviarTeaserOfertaBombaAlCanalFree($porcentaje, $producto->categoria_origen ?? null);
-            }
         } catch (\Throwable $e) {
             Log::warning('NotificadorTelegram: error tras enviar oferta (cache/teaser)', [
                 'producto_id' => $producto->id,
@@ -169,18 +206,18 @@ class NotificadorTelegram
      */
     private function enviarOfertaSoloTextoADestinos(Producto $producto, float $porcentaje, array $destinos): void
     {
-        $token = config('services.telegram.token');
+        $token = Configuracion::getTelegramToken();
         if (empty($token)) {
             return;
         }
-        $urlAfiliado = $producto->url_afiliado_completa ?? $producto->url_original;
+        $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
         foreach ($destinos as $destino) {
             $this->enviarMensajeSinFoto($token, $destino['chat_id'], $destino['caption'], $urlAfiliado, $producto->id);
         }
     }
 
     /**
-     * Captura una vez y envía a cada destino (Premium y/o Gratis). Misma captura, caption por canal.
+     * Captura una vez y envía al destino. Misma captura y caption.
      *
      * @param  array<int, array{chat_id: string, caption: string}>  $destinos
      */
@@ -197,7 +234,28 @@ class NotificadorTelegram
             return;
         }
 
-        $contenidoCaptura = $this->capturarPantallaProductoConReintentos($urlPagina, $producto->id);
+        // No usar Browsershot para URLs de tracking (click1, mclics): no son página de producto y llenan logs de error.
+        $esUrlTracking = str_contains($urlPagina, 'click1.mercadolibre') || str_contains($urlPagina, 'mclics');
+        if ($esUrlTracking) {
+            Log::info('NotificadorTelegram: URL de tracking ML detectada, omitiendo Browsershot.', [
+                'producto_id' => $producto->id,
+                'tienda' => $producto->tienda_origen,
+            ]);
+        }
+
+        $contenidoCaptura = null;
+        if (! $esUrlTracking && $this->chromeDisponible()) {
+            $contenidoCaptura = $this->capturarPantallaProductoConReintentos($urlPagina, $producto->id);
+        } elseif (! $esUrlTracking) {
+            Log::info('NotificadorTelegram: Chrome no disponible, omitiendo Browsershot.', [
+                'producto_id' => $producto->id,
+            ]);
+        }
+
+        if ($contenidoCaptura === null && ! $esUrlTracking) {
+            $contenidoCaptura = $this->capturarConApiExterna($urlPagina, $producto->id);
+        }
+
         if ($contenidoCaptura !== null && $contenidoCaptura !== '') {
             foreach ($destinos as $destino) {
                 $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenidoCaptura, $destino['caption'], $urlAfiliado, $producto->id);
@@ -205,13 +263,62 @@ class NotificadorTelegram
             return;
         }
 
-        Log::info('NotificadorTelegram: fallback a solo texto (captura no disponible).', [
+        // Fallback: usar imagen del listado (imagen_url) extraída por el motor — prioridad: que la notificación siempre salga.
+        // Las imágenes se descargan siempre por IP directa del VPS (sin proxy) para no consumir GB del proxy.
+        $imagenUrl = $producto->imagen_url ?? '';
+        if ($imagenUrl !== '' && str_starts_with($imagenUrl, 'http')) {
+            $contenidoImagen = $this->descargarImagenListado($imagenUrl);
+            if ($contenidoImagen !== null && $contenidoImagen !== '') {
+                Log::info('NotificadorTelegram: usando imagen del producto (motor).', [
+                    'producto_id' => $producto->id,
+                    'tienda' => $producto->tienda_origen,
+                ]);
+                $sufijoListado = "\n\n🖼️ (Imagen del producto)";
+                foreach ($destinos as $destino) {
+                    $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenidoImagen, $destino['caption'] . $sufijoListado, $urlAfiliado, $producto->id);
+                }
+                return;
+            }
+        }
+
+        Log::info('NotificadorTelegram: envío solo texto (sin captura ni imagen del producto).', [
             'producto_id' => $producto->id,
             'url' => $urlPagina,
             'tienda' => $producto->tienda_origen,
         ]);
         foreach ($destinos as $destino) {
             $this->enviarMensajeSinFoto($token, $destino['chat_id'], $destino['caption'] . $captionFallback, $urlAfiliado, $producto->id);
+        }
+    }
+
+    /**
+     * Descarga la imagen del producto para Telegram. NUNCA usa proxy: solo IP directa del VPS.
+     * El proxy se usa únicamente para el GET inicial del HTML; las imágenes no consumen GB del proxy.
+     */
+    private function descargarImagenListado(string $imagenUrl): ?string
+    {
+        try {
+            $response = Http::timeout(15)->connectTimeout(5)->get($imagenUrl);
+            if (! $response->successful()) {
+                return null;
+            }
+            $body = $response->body();
+            if ($body === '' || strlen($body) < 100) {
+                return null;
+            }
+            $contentType = $response->header('Content-Type', '');
+            if (! str_contains($contentType, 'image/')) {
+                return null;
+            }
+
+            return $body;
+        } catch (\Throwable $e) {
+            Log::debug('NotificadorTelegram: no se pudo descargar imagen del listado', [
+                'url' => $imagenUrl,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
         }
     }
 
@@ -225,49 +332,7 @@ class NotificadorTelegram
     }
 
     /**
-     * Marketing FOMO: teaser dinámico al canal Free cuando la oferta es Premium.
-     * No incluye nombre ni enlace del producto; usa categoría, % de ahorro y botón a TELEGRAM_PREMIUM_JOIN_URL.
-     */
-    private function enviarTeaserOfertaBombaAlCanalFree(float $porcentajeAhorro, ?string $categoria = null): void
-    {
-        $token = config('services.telegram.token');
-        $chatIdFree = config('services.telegram.chat_id_free');
-        $linkPremium = config('services.telegram.premium_join_url', '');
-
-        if (empty($token) || empty($chatIdFree)) {
-            return;
-        }
-
-        $categoriaLabel = trim((string) $categoria) !== '' ? $this->escaparHtml($categoria) : 'Ofertas';
-        $pct = number_format($porcentajeAhorro, 0);
-        $texto = "🚨 <b>¡OFERTA BOMBA DETECTADA en {$categoriaLabel}!</b> 🚨\n\n"
-            . "Un producto de esta categoría acaba de bajar un <b>{$pct}%</b>. 😱\n\n"
-            . "🔒 Este enlace es exclusivo para miembros Premium. ¡Aprovecha antes de que se agote!";
-
-        $payload = [
-            'chat_id' => $chatIdFree,
-            'text' => $texto,
-            'parse_mode' => 'HTML',
-        ];
-        if (! empty($linkPremium)) {
-            $payload['reply_markup'] = json_encode([
-                'inline_keyboard' => [
-                    [['text' => '⭐ ¡Ver Oferta Premium ahora!', 'url' => $linkPremium]],
-                ],
-            ]);
-        }
-
-        $response = Http::withOptions(['verify' => false])
-            ->timeout(10)
-            ->connectTimeout(5)
-            ->asForm()
-            ->post("https://api.telegram.org/bot{$token}/sendMessage", $payload);
-        $this->asegurarNoRateLimit($response);
-    }
-
-    /**
      * Envía la oferta solo como texto (sin foto). Usado cuando enviar_imagenes está desactivado o como fallback.
-     * Primero envía el mensaje al canal que corresponda; si es bomba, después el teaser al canal Free.
      */
     public function enviarOfertaSoloTexto(Producto $producto): void
     {
@@ -287,15 +352,15 @@ class NotificadorTelegram
             'destinos' => count($destinos),
         ]);
         $this->enviarOfertaSoloTextoADestinos($producto, $porcentaje, $destinos);
-        if ($this->esOfertaBomba($porcentaje)) {
-            $this->enviarTeaserOfertaBombaAlCanalFree($porcentaje, $producto->categoria_origen ?? null);
-        }
     }
 
     /**
-     * Construye el texto del mensaje según canal (Premium 💎 / Free 🔥) y si es solo texto (más emojis/separadores).
+     * Construye el texto del mensaje. Diseño unificado para todas las ofertas.
+     * Para Mercado Libre se añade bloque: ID para buscador + enlace (meli.la o URL larga).
+     *
+     * @param  array{url_display: string, item_id: string}|null  $datosMl  Solo para tienda Mercado Libre.
      */
-    private function construirCaption(Producto $producto, float $porcentaje, bool $esPremium, bool $soloTexto): string
+    private function construirCaption(Producto $producto, float $porcentaje, bool $soloTexto, ?array $datosMl = null): string
     {
         $precioOriginal = number_format((float) $producto->precio_original, 2);
         $precioOferta = $producto->precio_oferta !== null
@@ -304,36 +369,26 @@ class NotificadorTelegram
         $nombreLimpio = $this->escaparHtml(strip_tags((string) ($producto->nombre ?? '')));
         $tienda = $this->escaparHtml($producto->tienda_origen ?? '');
         $ahorro = number_format($porcentaje, 1);
+        $sep = $soloTexto ? "\n──────────────\n" : "\n";
+        $lineas = [
+            '🛒 <b>Nueva oferta</b>',
+            $sep,
+            '<b>' . $nombreLimpio . '</b>',
+            '',
+            '<b>Precio oferta: $' . $precioOferta . '</b>',
+            'Precio original: <s>$' . $precioOriginal . '</s>',
+            'Ahorro: <b>' . $ahorro . '%</b>',
+            $soloTexto ? "\n──────────────" : '',
+            $tienda,
+        ];
+        $caption = implode("\n", array_filter($lineas));
 
-        if ($esPremium) {
-            $sep = $soloTexto ? "\n──────────────\n" : "\n";
-            $lineas = [
-                '💎 <b>OFERTA PREMIUM</b> 💎',
-                $sep,
-                '<b>' . $nombreLimpio . '</b>',
-                '',
-                '<b>Precio oferta: $' . $precioOferta . '</b>',
-                'Precio original: <s>$' . $precioOriginal . '</s>',
-                'Ahorro: <b>' . $ahorro . '%</b>',
-                $soloTexto ? "\n──────────────" : '',
-                $tienda,
-            ];
-        } else {
-            $sep = $soloTexto ? "\n──────────────\n" : "\n";
-            $lineas = [
-                '🔥 <b>Nueva oferta</b> 🔥',
-                $sep,
-                '<b>' . $nombreLimpio . '</b>',
-                '',
-                '<b>Precio oferta: $' . $precioOferta . '</b>',
-                'Precio original: <s>$' . $precioOriginal . '</s>',
-                'Ahorro: <b>' . $ahorro . '%</b>',
-                $soloTexto ? "\n──────────────" : '',
-                $tienda,
-            ];
+        if ($datosMl !== null && (trim($producto->tienda_origen ?? '') === 'Mercado Libre')) {
+            $caption .= "\n\n🔍 Pega este ID en el buscador de Mercado Libre: " . $this->escaparHtml($datosMl['item_id'] ?: '—');
+            $caption .= "\n🔗 O ingresa al siguiente link:\n" . $datosMl['url_display'];
         }
 
-        return implode("\n", array_filter($lineas));
+        return $caption;
     }
 
     private function escaparHtml(string $texto): string
@@ -342,11 +397,11 @@ class NotificadorTelegram
     }
 
     /**
-     * Envía la oferta según la calidad de la bajada, usando los IDs de canal del .env.
-     * Regla de oro: si permite_descuento_adicional es false, no se envía a ningún canal.
-     * - Bajada ≥30%: canal Premium, mensaje con captura Browsershot (formato "BAJADA HISTÓRICA").
-     * - Bajada entre 10% y 29.9%: canal Gratis, mensaje solo texto (sin captura, para ahorrar recursos y motivar Premium).
-     * - Bajada &lt;10%: no se envía nada.
+     * Envía la oferta según la calidad de la bajada al canal principal.
+     * Regla: si permite_descuento_adicional es false, no se envía.
+     * - Bajada ≥30%: mensaje con captura Browsershot (formato "BAJADA HISTÓRICA").
+     * - Bajada entre 10% y 29.9%: mensaje solo texto (sin captura).
+     * - Bajada &lt;10%: no se envía.
      *
      * @param  float  $precioAyer  Precio anterior (para el caption).
      * @param  float  $precioHoy  Precio actual (para el caption).
@@ -371,50 +426,36 @@ class NotificadorTelegram
             return;
         }
 
-        $token = config('services.telegram.token');
+        $token = Configuracion::getTelegramToken();
         if (empty($token)) {
             Log::debug('NotificadorTelegram: TELEGRAM_BOT_TOKEN no configurado.');
             return;
         }
 
-        if ($bajada >= 30) {
-            $idCanal = config('services.telegram.chat_id_premium');
-            if ($idCanal === null || $idCanal === '') {
-                Log::debug('NotificadorTelegram: bajada ≥30% pero TELEGRAM_CHAT_ID_PREMIUM no configurado.');
-                return;
-            }
-            $this->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy, (string) $idCanal);
-            Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
-            Log::info('NotificadorTelegram: oferta de bajada enviada a canal Premium', [
-                'producto_id' => $producto->id,
-                'sku_tienda' => $producto->sku_tienda,
-                'bajada_porcentaje' => round($bajada, 1),
-            ]);
+        $idCanal = Configuracion::getTelegramChatId();
+        if ($idCanal === null || (string) $idCanal === '') {
+            Log::debug('NotificadorTelegram: TELEGRAM_CHAT_ID no configurado para bajada histórica.');
             return;
         }
 
-        if ($bajada >= 10 && $bajada < 30) {
-            $idCanal = config('services.telegram.chat_id_free');
-            if ($idCanal === null || $idCanal === '') {
-                Log::debug('NotificadorTelegram: bajada 10–29.9% pero TELEGRAM_CHAT_ID_FREE no configurado.');
-                return;
-            }
+        if ($bajada >= 30) {
+            $this->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy, (string) $idCanal);
+        } else {
             $caption = $this->construirCaptionBajadaHistorica($producto, $precioAyer, $precioHoy, $bajada);
-            $urlAfiliado = $producto->url_afiliado_completa ?? $producto->url_original;
+            $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
             $this->enviarMensajeSinFoto($token, (string) $idCanal, $caption, $urlAfiliado, $producto->id);
-            Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
-            Log::info('NotificadorTelegram: oferta de bajada enviada a canal Gratis', [
-                'producto_id' => $producto->id,
-                'sku_tienda' => $producto->sku_tienda,
-                'bajada_porcentaje' => round($bajada, 1),
-            ]);
         }
+        Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
+        Log::info('NotificadorTelegram: oferta de bajada enviada', [
+            'producto_id' => $producto->id,
+            'sku_tienda' => $producto->sku_tienda,
+            'bajada_porcentaje' => round($bajada, 1),
+        ]);
     }
 
     /**
-     * Distribuye una oferta de bajada de precio al canal correspondiente (Gratis o Premium).
-     * Reglas: no enviar si el producto no permite descuento adicional; ≥30% o "Error de precio" → Premium;
-     * entre 10% y 29.9% → Gratis; &lt;10% no se notifica.
+     * Distribuye una oferta de bajada de precio al canal principal.
+     * Reglas: no enviar si el producto no permite descuento adicional; &lt;10% no se notifica.
      */
     public function distribuirOferta(Producto $producto, float $precioAyer, float $precioHoy): void
     {
@@ -426,31 +467,26 @@ class NotificadorTelegram
             ? (($precioAyer - $precioHoy) / $precioAyer) * 100
             : 0.0;
 
-        $esErrorPrecio = (bool) ($producto->es_error_precio ?? false);
-
-        if ($porcentajeBajada >= 30 || $esErrorPrecio) {
-            $idCanal = config('services.telegram.chat_id_premium');
-        } elseif ($porcentajeBajada >= 10 && $porcentajeBajada < 30) {
-            $idCanal = config('services.telegram.chat_id_free');
-        } else {
+        if ($porcentajeBajada < 10) {
             return;
         }
 
-        if ($idCanal === null || $idCanal === '') {
-            Log::debug('NotificadorTelegram: canal no configurado para distribuirOferta.');
+        $idCanal = Configuracion::getTelegramChatId();
+        if ($idCanal === null || (string) $idCanal === '') {
+            Log::debug('NotificadorTelegram: TELEGRAM_CHAT_ID no configurado para distribuirOferta.');
             return;
         }
 
-        $this->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy, $idCanal);
+        $this->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy, (string) $idCanal);
     }
 
     /**
      * Notifica una bajada histórica de precio con captura de pantalla de la página del producto.
-     * Si se pasa $chatId se usa ese canal; si no, se resuelve con chatIdParaBajadaHistorica (≥30% Premium, 10-29.9% Gratis).
+     * Si se pasa $chatId se usa ese canal; si no, se usa TELEGRAM_CHAT_ID (bajada ≥ 10%).
      */
     public function notificarBajadaHistoricaConCaptura(Producto $producto, float $precioAyer, float $precioHoy, ?string $chatId = null): void
     {
-        $token = config('services.telegram.token');
+        $token = Configuracion::getTelegramToken();
         $porcentajeBajada = $precioAyer > 0
             ? (($precioAyer - $precioHoy) / $precioAyer) * 100
             : 0.0;
@@ -465,7 +501,7 @@ class NotificadorTelegram
         }
 
         $caption = $this->construirCaptionBajadaHistorica($producto, $precioAyer, $precioHoy, $porcentajeBajada);
-        $urlAfiliado = $producto->url_afiliado_completa ?? $producto->url_original;
+        $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
         $this->enviarConCapturaOFallback(
             $token,
             $chatId,
@@ -594,15 +630,17 @@ class NotificadorTelegram
     private function capturarPantallaProducto(string $urlPagina, int $productoId): ?string
     {
         $timeout = config('browsershot.timeout', 45);
-        $ancho = config('browsershot.ancho', 1280);
-        $alto = config('browsershot.alto', 800);
         $esCalimax = str_contains($urlPagina, 'calimax.com.mx');
+        $esMercadoLibre = str_contains($urlPagina, 'mercadolibre.com');
         if ($esCalimax) {
             $timeout = max($timeout, 45);
             Log::info('NotificadorTelegram: intentando captura Browsershot para Calimax', [
                 'producto_id' => $productoId,
                 'url' => $urlPagina,
             ]);
+        }
+        if ($esMercadoLibre) {
+            $timeout = max($timeout, 30);
         }
         $rutaTemp = storage_path('app/temp/captura-producto-' . $productoId . '-' . (getmypid() ?: 0) . '-' . uniqid('', true) . '.png');
 
@@ -613,20 +651,17 @@ class NotificadorTelegram
 
             $shot = Browsershot::url($urlPagina)
                 ->noSandbox()
-                ->addChromiumArguments([0 => 'disable-setuid-sandbox']) // Crucial para Linux (VPS/servidor sin display)
+                ->addChromiumArguments(['--disable-setuid-sandbox'])
                 ->timeout($timeout)
-                ->windowSize($ancho, $alto);
+                ->windowSize(1280, 800);
 
-            // Chromium del sistema: solo si está definido y es ejecutable (evita usar ruta rota que rompa capturas).
-            $chromePath = trim((string) config('browsershot.chrome_path', ''));
-            if ($chromePath !== '' && is_executable($chromePath)) {
-                $shot->setChromePath($chromePath);
-            }
+            $chromePath = $this->resolverRutaChrome();
+            $shot->setChromePath($chromePath !== '' ? $chromePath : '/usr/bin/google-chrome');
 
-            // Calimax/VTEX: User-Agent de navegador real para reducir bloqueos a headless.
-            if ($esCalimax) {
+            // Calimax/VTEX y Mercado Libre: User-Agent de navegador real para reducir bloqueos a headless.
+            if ($esCalimax || $esMercadoLibre) {
                 $shot->userAgent(
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
                 );
             }
 
@@ -644,6 +679,9 @@ class NotificadorTelegram
             if ($esCalimax) {
                 Log::info('NotificadorTelegram: captura Browsershot Calimax OK', ['producto_id' => $productoId]);
             }
+            if ($esMercadoLibre) {
+                Log::info('NotificadorTelegram: captura Browsershot Mercado Libre OK', ['producto_id' => $productoId]);
+            }
 
             return $contenido !== false ? $contenido : null;
         } catch (ProcessTimedOutException $e) {
@@ -652,6 +690,7 @@ class NotificadorTelegram
                 'producto_id' => $productoId,
                 'timeout' => $timeout,
                 'es_calimax' => $esCalimax,
+                'es_mercadolibre' => $esMercadoLibre ?? false,
             ]);
             @unlink($rutaTemp);
             return null;
@@ -677,10 +716,98 @@ class NotificadorTelegram
     }
 
     /**
+     * Resuelve la ruta ejecutable de Chrome/Chromium para Browsershot (Linux: Could not find Chrome).
+     * Usa config browsershot.chrome_path; si no existe o no es ejecutable, prueba rutas habituales.
+     */
+    private function resolverRutaChrome(): string
+    {
+        $configPath = trim((string) config('browsershot.chrome_path', ''));
+        if ($configPath !== '' && is_executable($configPath)) {
+            return $configPath;
+        }
+        $candidatos = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'];
+        foreach ($candidatos as $path) {
+            if (is_executable($path)) {
+                return $path;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Comprueba si Chrome/Chromium está disponible antes de intentar Browsershot.
+     * Evita timeouts y errores cuando el binario no está instalado o no es ejecutable.
+     */
+    private function chromeDisponible(): bool
+    {
+        $ruta = $this->resolverRutaChrome();
+        if ($ruta !== '') {
+            return true;
+        }
+        $fallback = '/usr/bin/google-chrome';
+        return is_executable($fallback);
+    }
+
+    /**
+     * Intenta obtener una captura de pantalla vía API externa (ej. ScreenshotLayer).
+     * Solo se usa como fallback cuando Browsershot no está disponible o falla.
+     * Config: services.captura_api.url y services.captura_api.key (opcional según proveedor).
+     *
+     * @return string|null Contenido binario de la imagen o null si falla o no está configurado.
+     */
+    private function capturarConApiExterna(string $urlPagina, int $productoId): ?string
+    {
+        $apiUrl = config('services.captura_api.url');
+        $apiKey = config('services.captura_api.key');
+        if ($apiUrl === null || $apiUrl === '') {
+            return null;
+        }
+
+        $params = ['url' => $urlPagina];
+        if ($apiKey !== null && $apiKey !== '') {
+            $params['access_key'] = $apiKey;
+        }
+        $requestUrl = str_contains($apiUrl, '?') ? $apiUrl . '&' . http_build_query($params) : $apiUrl . '?' . http_build_query($params);
+
+        try {
+            $response = Http::timeout(25)->connectTimeout(10)->get($requestUrl);
+            if (! $response->successful()) {
+                Log::debug('NotificadorTelegram: API captura externa falló', [
+                    'producto_id' => $productoId,
+                    'status' => $response->status(),
+                ]);
+                return null;
+            }
+            $body = $response->body();
+            if ($body === '' || strlen($body) < 200) {
+                return null;
+            }
+            $contentType = $response->header('Content-Type', '');
+            if (! str_contains($contentType, 'image/') && ! str_contains($contentType, 'octet-stream')) {
+                Log::debug('NotificadorTelegram: API captura no devolvió imagen', [
+                    'producto_id' => $productoId,
+                    'content_type' => $contentType,
+                ]);
+                return null;
+            }
+            Log::info('NotificadorTelegram: captura vía API externa OK', ['producto_id' => $productoId]);
+            return $body;
+        } catch (\Throwable $e) {
+            Log::debug('NotificadorTelegram: excepción en API captura externa', [
+                'producto_id' => $productoId,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
      * Envía la foto (captura) a Telegram. Si se pasa $productoId, guarda el message_id para limpieza posterior.
      */
     private function enviarFotoConCaptura(string $token, string $chatId, string $contenidoImagen, string $caption, ?string $urlAfiliado, ?int $productoId = null): void
     {
+        Log::info('Enviando mensaje al Chat ID: ' . $chatId);
         $urlApi = "https://api.telegram.org/bot{$token}/sendPhoto";
         $payload = [
             'chat_id' => $chatId,
@@ -721,6 +848,7 @@ class NotificadorTelegram
      */
     private function enviarMensajeSinFoto(string $token, string $chatId, string $caption, ?string $urlAfiliado, ?int $productoId = null): void
     {
+        Log::info('Enviando mensaje al Chat ID: ' . $chatId);
         $urlApi = "https://api.telegram.org/bot{$token}/sendMessage";
         $payload = [
             'chat_id' => $chatId,
@@ -782,8 +910,54 @@ class NotificadorTelegram
      */
     public function enviarMensajeSimple(string $texto): void
     {
-        $chatId = config('services.telegram.chat_id');
+        $chatId = Configuracion::getTelegramChatId();
         $this->enviarMensajeAChat($chatId !== null && $chatId !== '' ? (string) $chatId : null, $texto);
+    }
+
+    /**
+     * Envía una alerta de error al canal configurado (fallos de envío de ofertas).
+     * Usa HTML para formato. Si el chat no está configurado, no hace nada.
+     */
+    public function enviarMensajeAlertaError(string $textoHtml): void
+    {
+        $chatId = Configuracion::getTelegramChatId();
+        if ($chatId === null || (string) $chatId === '') {
+            return;
+        }
+        $this->enviarMensajeAChat((string) $chatId, $textoHtml, 'HTML');
+    }
+
+    /**
+     * Envía un mensaje de prueba al chat indicado (Centro de Control → Probar Conexión).
+     *
+     * @return array{ok: bool, error?: string}
+     */
+    public function enviarMensajePruebaAChat(string $chatId): array
+    {
+        $token = Configuracion::getTelegramToken();
+        if (empty($token)) {
+            return ['ok' => false, 'error' => 'Bot Token no configurado.'];
+        }
+        if ($chatId === '') {
+            return ['ok' => false, 'error' => 'Chat ID vacío.'];
+        }
+        $urlApi = "https://api.telegram.org/bot{$token}/sendMessage";
+        $response = Http::withOptions(['verify' => false])
+            ->timeout(10)
+            ->connectTimeout(5)
+            ->asForm()
+            ->post($urlApi, [
+                'chat_id' => $chatId,
+                'text' => '🧪 Prueba desde Centro de Control. Si ves esto, el bot y el canal están bien.',
+                'parse_mode' => 'HTML',
+            ]);
+        if ($response->successful()) {
+            return ['ok' => true];
+        }
+        $body = $response->json();
+        $desc = $body['description'] ?? $response->body();
+
+        return ['ok' => false, 'error' => $desc];
     }
 
     /**
@@ -793,10 +967,11 @@ class NotificadorTelegram
      */
     private function enviarMensajeAChat(?string $chatId, string $texto, ?string $parseMode = null): void
     {
-        $token = config('services.telegram.token');
+        $token = Configuracion::getTelegramToken();
         if (empty($token) || $chatId === null || $chatId === '') {
             return;
         }
+        Log::info('Enviando mensaje al Chat ID: ' . $chatId);
         $urlApi = "https://api.telegram.org/bot{$token}/sendMessage";
         $payload = ['chat_id' => $chatId, 'text' => $texto];
         if ($parseMode !== null && $parseMode !== '') {
@@ -817,12 +992,12 @@ class NotificadorTelegram
     }
 
     /**
-     * Envía al canal Premium un resumen corto al finalizar el rastreo (ej. "🏁 Rastreo de Calimax finalizado. 48 productos procesados, 32 ofertas enviadas").
+     * Envía al canal principal un resumen corto al finalizar el rastreo.
      */
     public function enviarResumenFinalRastreo(string $tiendaOrigen, int $productosProcesados, int $ofertasEnviadas): void
     {
-        $chatId = config('services.telegram.chat_id_premium');
-        if ($chatId === null || $chatId === '') {
+        $chatId = Configuracion::getTelegramChatId();
+        if ($chatId === null || (string) $chatId === '') {
             return;
         }
         $texto = "🏁 <b>Rastreo de {$tiendaOrigen} finalizado.</b>\n\n"
@@ -831,8 +1006,7 @@ class NotificadorTelegram
     }
 
     /**
-     * Envía a cada canal (Premium / Normal) un resumen de cuántas ofertas recibirán.
-     * Premium = ≥ umbral % (ej. 20%); Normal = resto con descuento suficiente (ej. 10–19%).
+     * Envía al canal principal un resumen de cuántas ofertas recibirán.
      *
      * @param  Collection<int, Producto>  $productos
      */
@@ -841,21 +1015,11 @@ class NotificadorTelegram
         if ($productos->isEmpty()) {
             return;
         }
-        $umbralPremium = Configuracion::porcentajeMinimoParaPremium();
-        $minimo = Configuracion::porcentajeMinimoNotificacion();
-        $premium = $productos->filter(function (Producto $p) use ($umbralPremium, $minimo): bool {
-            $porcentaje = (float) ($p->porcentaje_ahorro ?? 0);
-            return $porcentaje >= $umbralPremium || $porcentaje < $minimo;
-        })->count();
-        $normales = $productos->count() - $premium;
-
-        $chatPremium = config('services.telegram.chat_id_premium');
-        $chatFree = config('services.telegram.chat_id_free');
-        if ($premium > 0 && $chatPremium !== null && $chatPremium !== '') {
-            $this->enviarMensajeAChat((string) $chatPremium, "💎 <b>{$tiendaOrigen}: Resumen</b>\n\nVas a recibir <b>{$premium} ofertas Premium</b> (≥{$umbralPremium}% descuento).", 'HTML');
+        $total = $productos->count();
+        $chatId = Configuracion::getTelegramChatId();
+        if ($chatId === null || (string) $chatId === '') {
+            return;
         }
-        if ($normales > 0 && $chatFree !== null && $chatFree !== '') {
-            $this->enviarMensajeAChat((string) $chatFree, "🔥 <b>{$tiendaOrigen}: Resumen</b>\n\nVas a recibir <b>{$normales} ofertas</b> para clientes normales (descuento &lt;{$umbralPremium}%).", 'HTML');
-        }
+        $this->enviarMensajeAChat((string) $chatId, "🛒 <b>{$tiendaOrigen}: Resumen</b>\n\nVas a recibir <b>{$total} ofertas</b>.", 'HTML');
     }
 }

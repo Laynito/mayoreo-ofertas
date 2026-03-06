@@ -31,10 +31,8 @@ class CalculadoraOfertas
 
     /**
      * Obtiene el precio final a mostrar según la restricción del producto.
-     * Si permite_descuento_adicional es false, se ignora cualquier descuento
-     * adicional y se devuelve el precio base (oferta o original).
-     * Si es true, se puede aplicar un descuento adicional (por ejemplo desde
-     * una regla de Filament).
+     * Si en Filament el producto tiene "Permitir descuento adicional" desactivado
+     * (permite_descuento_adicional = false), no se aplica ninguna rebaja extra y se devuelve el precio base.
      *
      * @param  Producto  $producto  Producto.
      * @param  float|null  $descuentoAdicionalPorcentaje  Porcentaje de descuento extra a aplicar (0-100). Solo se aplica si el producto lo permite.

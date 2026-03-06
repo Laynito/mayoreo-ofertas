@@ -13,7 +13,8 @@ class RastrearTienda extends Command
     protected $signature = 'rastreo:tienda
                             {tienda : Nombre de la tienda (ej. Coppel, Walmart)}
                             {--max= : Procesar solo los primeros N productos (ej. 10 o 20) para agilizar}
-                            {--notificar-todos : Encolar todas las ofertas con descuento (por defecto solo nuevas o actualizadas)}';
+                            {--notificar-todos : Encolar todas las ofertas con descuento (por defecto solo nuevas o actualizadas)}
+                            {--min-discount=10 : Descuento mínimo % para Mercado Libre (por defecto 10)}';
 
     protected $description = 'Rastrea ofertas de una tienda, actualiza productos y registra historial de precios';
 
@@ -28,9 +29,11 @@ class RastrearTienda extends Command
         $tiendaArgumento = $this->argument('tienda');
         $max = $this->option('max') !== null ? (int) $this->option('max') : null;
 
+        $minDiscount = $this->option('min-discount') !== null ? (int) $this->option('min-discount') : 10;
         return $this->runRastreo($tiendaArgumento, [
             'max' => $max,
             'notificar_todos' => (bool) $this->option('notificar-todos'),
+            'min_discount' => $minDiscount,
         ]);
     }
 }

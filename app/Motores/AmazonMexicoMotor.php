@@ -2,6 +2,7 @@
 
 namespace App\Motores;
 
+use App\Models\Configuracion;
 use App\Support\HttpRastreador;
 use DOMDocument;
 use DOMXPath;
@@ -9,10 +10,11 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Motor de rastreo para Amazon México.
- * Enfocado solo en Ofertas del Día (Gold Box): amazon.com.mx/gp/goldbox.
- * Proxy Inteligente: cuando PROXY_URL está definida, todo el tráfico de este motor pasa por el proxy.
- * Si el precio baja más de 25%, el Job se encola con prioridad alta y sin delay (RastreoTiendaComando).
+ * Motor de rastreo para Amazon México (Gold Box).
+ * - URL: amazon.com.mx/gp/goldbox.
+ * - Proxy dedicado: config('services.proxy_url_amazon') o fallback a proxy general. Smartproxy: usar sesión session-AmazonMX_Pro01.
+ * - Tag de afiliado: anadirTagAmazon() en todos los enlaces (?tag= env AMAZON_TAG, default micosmtics-20).
+ * - Selectores: contenedor [data-testid="grid-desktop-item"], precio .a-price-whole, nombre h2.
  */
 class AmazonMexicoMotor extends BaseMotorRastreador
 {
@@ -59,27 +61,32 @@ class AmazonMexicoMotor extends BaseMotorRastreador
     }
 
     /**
-     * Recolecta datos desde Gold Box usando Laravel Http con cabeceras Chrome.
-     * Respeta permite_descuento_adicional (aplicado en RastreoTiendaComando al encolar).
+     * Recolecta datos desde Gold Box. Usa proxy de Amazon (sesión distinta a ML) y caché 10 min para ahorrar GB.
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     public function recolectarDatos(): array
     {
         $url = rtrim(self::URL_BASE, '/') . '/' . ltrim(self::RUTA_OFERTAS, '/');
+        $proxyAmazon = config('services.proxy_url_amazon') ?: Configuracion::getProxyUrl();
 
-        $request = Http::withHeaders($this->cabecerasChrome())
-            ->timeout(15)
-            ->connectTimeout(10)
-            ->withOptions(['verify' => true]);
-        $respuesta = HttpRastreador::conProxy($request)->get($url);
+        $resultado = HttpRastreador::getCachedOrFetch($url, function () use ($url, $proxyAmazon): array {
+            $request = Http::withHeaders($this->cabecerasChrome())
+                ->timeout(15)
+                ->connectTimeout(10)
+                ->withOptions(['verify' => true]);
+            $request = HttpRastreador::conProxySiTexto($request, $url, $proxyAmazon);
+            $respuesta = $request->get($url);
 
-        if (! $respuesta->successful()) {
-            Log::info('AmazonMexicoMotor: respuesta no exitosa', ['url' => $url, 'status' => $respuesta->status()]);
+            return ['body' => $respuesta->body(), 'status' => $respuesta->status()];
+        }, HttpRastreador::CACHE_PROXY_TTL);
+
+        if ($resultado['status'] < 200 || $resultado['status'] >= 300) {
+            Log::info('AmazonMexicoMotor: respuesta no exitosa', ['url' => $url, 'status' => $resultado['status']]);
             return [];
         }
 
-        $productos = $this->extraerProductosDeRespuesta($respuesta->body(), $url);
+        $productos = $this->extraerProductosDeRespuesta($resultado['body'], $url);
 
         if (empty($productos) && app()->environment('local')) {
             Log::info('AmazonMexicoMotor: sin datos de extracción; usando producto de prueba para verificación.');
@@ -219,7 +226,7 @@ class AmazonMexicoMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta !== null ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => self::URL_BASE . '/dp/' . $asin,
+            'url_original' => $this->anadirTagAmazon(self::URL_BASE . '/dp/' . $asin),
         ];
     }
 
@@ -302,16 +309,24 @@ class AmazonMexicoMotor extends BaseMotorRastreador
         }
         $xpath = new DOMXPath($dom);
 
-        // 1) Contenedores con data-asin (Amazon puede cambiar la clase, por eso probamos varias)
-        $nodos = $xpath->query("//div[contains(concat(' ', normalize-space(@class), ' '), ' s-result-item ') and @data-asin and string-length(normalize-space(@data-asin)) > 0]");
-        if ($nodos === false || $nodos->length === 0) {
-            $nodos = $xpath->query("//*[@data-component-type='s-search-result' and @data-asin and string-length(normalize-space(@data-asin)) > 0]");
-        }
-        if ($nodos === false || $nodos->length === 0) {
-            $nodos = $xpath->query("//*[@data-asin and string-length(normalize-space(@data-asin)) > 0 and not(ancestor::*[@data-asin])]");
-        }
+        // 0) Selector moderno Gold Box: grid-desktop-item (h2 título, .a-price-whole precio)
+        $nodos = $xpath->query("//*[@data-testid='grid-desktop-item']");
         if ($nodos !== false && $nodos->length > 0) {
-            $productos = $this->mapearNodosAProductos($xpath, $nodos);
+            $productos = $this->mapearGridItemsAProductos($xpath, $nodos);
+        }
+
+        // 1) Contenedores con data-asin (Amazon puede cambiar la clase, por eso probamos varias)
+        if (empty($productos)) {
+            $nodos = $xpath->query("//div[contains(concat(' ', normalize-space(@class), ' '), ' s-result-item ') and @data-asin and string-length(normalize-space(@data-asin)) > 0]");
+            if ($nodos === false || $nodos->length === 0) {
+                $nodos = $xpath->query("//*[@data-component-type='s-search-result' and @data-asin and string-length(normalize-space(@data-asin)) > 0]");
+            }
+            if ($nodos === false || $nodos->length === 0) {
+                $nodos = $xpath->query("//*[@data-asin and string-length(normalize-space(@data-asin)) > 0 and not(ancestor::*[@data-asin])]");
+            }
+            if ($nodos !== false && $nodos->length > 0) {
+                $productos = $this->mapearNodosAProductos($xpath, $nodos);
+            }
         }
 
         // 2) Fallback sin data-asin: extraer ASIN desde enlaces /dp/ o /gp/product/ y usar ancestro como tarjeta
@@ -354,6 +369,7 @@ class AmazonMexicoMotor extends BaseMotorRastreador
             if (str_starts_with($urlOriginal, '/')) {
                 $urlOriginal = self::URL_BASE . $urlOriginal;
             }
+            $urlOriginal = $this->anadirTagAmazon($urlOriginal);
 
             $precioFloat = $precio !== null ? (float) $precio : 0.0;
 
@@ -368,6 +384,70 @@ class AmazonMexicoMotor extends BaseMotorRastreador
         }
 
         return $productos;
+    }
+
+    /**
+     * Mapea nodos [data-testid="grid-desktop-item"] a productos (ASIN desde enlace, h2 título, .a-price-whole precio).
+     *
+     * @param  \DOMNodeList<\DOMNode>  $nodos
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     */
+    protected function mapearGridItemsAProductos(DOMXPath $xpath, \DOMNodeList $nodos): array
+    {
+        $productos = [];
+        $asinsVistos = [];
+        foreach ($nodos as $nodo) {
+            $enlace = $this->extraerEnlaceDesdeNodo($xpath, $nodo);
+            $asin = $enlace !== '' ? $this->extraerAsinDeHref($enlace) : '';
+            if ($asin === '' || strlen($asin) < 10 || isset($asinsVistos[$asin])) {
+                continue;
+            }
+
+            $precio = $this->extraerPrecioDesdeNodo($xpath, $nodo);
+            $nombre = $this->extraerNombreDesdeNodo($xpath, $nodo);
+            $imagenUrl = $this->extraerImagenDesdeNodo($xpath, $nodo);
+
+            if ($precio === null && $nombre === '') {
+                continue;
+            }
+
+            $asinsVistos[$asin] = true;
+            $urlOriginal = $enlace !== '' ? $enlace : (self::URL_BASE . '/dp/' . $asin);
+            if (str_starts_with($urlOriginal, '/')) {
+                $urlOriginal = self::URL_BASE . $urlOriginal;
+            }
+            $urlOriginal = $this->anadirTagAmazon($urlOriginal);
+
+            $precioFloat = $precio !== null ? (float) $precio : 0.0;
+
+            $productos[] = [
+                'sku_tienda' => 'AMZ-' . $asin,
+                'nombre' => $nombre !== '' ? $nombre : 'Producto Amazon ' . $asin,
+                'precio_original' => round($precioFloat, 2),
+                'precio_oferta' => $precioFloat > 0 ? round($precioFloat, 2) : null,
+                'imagen_url' => $imagenUrl !== '' ? $imagenUrl : null,
+                'url_original' => $urlOriginal,
+            ];
+        }
+
+        return $productos;
+    }
+
+    /**
+     * Añade el tag de afiliado Amazon a la URL (config services.amazon_tag).
+     */
+    protected function anadirTagAmazon(string $url): string
+    {
+        $tag = Configuracion::getAmazonTag();
+        if ($tag === null || $tag === '') {
+            return $url;
+        }
+        $separador = str_contains($url, '?') ? '&' : '?';
+        if (str_contains($url, 'tag=')) {
+            return preg_replace('/tag=[^&]+/', 'tag=' . $tag, $url);
+        }
+
+        return $url . $separador . 'tag=' . $tag;
     }
 
     /**
@@ -413,6 +493,7 @@ class AmazonMexicoMotor extends BaseMotorRastreador
 
             $asinsVistos[$asin] = true;
             $urlOriginal = str_starts_with($href, 'http') ? $href : (self::URL_BASE . '/' . ltrim(explode('?', $href)[0], '/'));
+            $urlOriginal = $this->anadirTagAmazon($urlOriginal);
             $precioFloat = $precio !== null ? (float) $precio : 0.0;
 
             $productos[] = [
@@ -461,11 +542,21 @@ class AmazonMexicoMotor extends BaseMotorRastreador
     }
 
     /**
-     * Precio desde .a-offscreen (principal) o .a-price; fallback: cualquier span con texto $número.
+     * Precio desde .a-offscreen (principal), .a-price-whole (grid moderno) o .a-price; fallback: span con $número.
      */
     protected function extraerPrecioDesdeNodo(DOMXPath $xpath, \DOMNode $nodo): ?float
     {
         $spans = $xpath->query(".//span[contains(concat(' ', normalize-space(@class), ' '), ' a-offscreen ')]", $nodo);
+        if ($spans !== false && $spans->length > 0) {
+            $texto = trim($spans->item(0)->textContent ?? '');
+            if ($texto !== '') {
+                $p = $this->parsearPrecioAmazon($texto);
+                if ($p !== null) {
+                    return $p;
+                }
+            }
+        }
+        $spans = $xpath->query(".//span[contains(concat(' ', normalize-space(@class), ' '), ' a-price-whole ')]", $nodo);
         if ($spans !== false && $spans->length > 0) {
             $texto = trim($spans->item(0)->textContent ?? '');
             if ($texto !== '') {
@@ -524,10 +615,17 @@ class AmazonMexicoMotor extends BaseMotorRastreador
     }
 
     /**
-     * Nombre/título: h2 (s-line-clamp o a-text-normal), luego enlace a /dp/, luego cualquier a con href /dp/.
+     * Nombre/título: cualquier h2 (grid-desktop-item), luego h2 con s-line-clamp/a-text-normal, luego enlace /dp/.
      */
     protected function extraerNombreDesdeNodo(DOMXPath $xpath, \DOMNode $nodo): string
     {
+        $h2 = $xpath->query(".//h2", $nodo);
+        if ($h2 !== false && $h2->length > 0) {
+            $texto = trim($h2->item(0)->textContent ?? '');
+            if ($texto !== '' && strlen($texto) > 3) {
+                return $texto;
+            }
+        }
         $h2 = $xpath->query(".//h2[contains(concat(' ', normalize-space(@class), ' '), ' s-line-clamp ') or contains(concat(' ', normalize-space(@class), ' '), ' a-text-normal ')]", $nodo);
         if ($h2 !== false && $h2->length > 0) {
             $texto = trim($h2->item(0)->textContent ?? '');
@@ -626,7 +724,7 @@ class AmazonMexicoMotor extends BaseMotorRastreador
             'precio_original' => round($precioOriginal > 0 ? $precioOriginal : 0, 2),
             'precio_oferta' => $precio > 0 ? round($precio, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $urlOriginal ? $this->anadirTagAmazon((string) $urlOriginal) : null,
         ];
     }
 }

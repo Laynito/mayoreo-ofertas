@@ -2,6 +2,7 @@
 
 namespace App\Motores;
 
+use App\Models\Configuracion;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -128,7 +129,7 @@ class CoppelMotor extends BaseMotorRastreador
         $headers['RSC'] = '1';
 
         $opciones = ['verify' => false];
-        $proxy = config('services.proxy_url');
+        $proxy = Configuracion::getProxyUrl();
         if ($proxy !== null && $proxy !== '') {
             $opciones['proxy'] = $proxy;
         }

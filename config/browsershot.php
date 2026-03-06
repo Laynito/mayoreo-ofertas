@@ -13,13 +13,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Ruta a Chrome/Chromium (opcional)
+    | Ruta a Chrome/Chromium
     |--------------------------------------------------------------------------
-    | Si Puppeteer no encuentra Chrome (Could not find Chrome ver. x.x), instala
-    | Chromium del sistema (apt install chromium) y define aquí la ruta al binario.
-    | Ejemplo: /usr/bin/chromium o /usr/bin/chromium-browser
+    | En Linux (VPS) Puppeteer suele no encontrar Chrome. Instala: apt install chromium
+    | y deja este valor por defecto, o usa /usr/bin/google-chrome si lo instalas.
+    | El servicio aplica --no-sandbox y --disable-setuid-sandbox para servidor sin display.
     */
-    'chrome_path' => env('BROWSERSHOT_CHROME_PATH', ''),
+    'chrome_path' => env('BROWSERSHOT_CHROME_PATH', '/usr/bin/chromium'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Argumentos de Chromium para servidor Linux (sin display)
+    |--------------------------------------------------------------------------
+    | --no-sandbox y --disable-setuid-sandbox se aplican en NotificadorTelegram
+    | vía noSandbox() y addChromiumArguments para que las capturas funcionen en VPS.
+    */
+    'chromium_args_linux' => ['--no-sandbox', '--disable-setuid-sandbox'],
 
     /*
     |--------------------------------------------------------------------------

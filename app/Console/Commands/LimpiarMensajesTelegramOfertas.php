@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Configuracion;
 use App\Models\TelegramMensajeOferta;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
@@ -20,7 +21,7 @@ class LimpiarMensajesTelegramOfertas extends Command
 
     public function handle(): int
     {
-        $token = config('services.telegram.token');
+        $token = Configuracion::getTelegramToken();
         if (empty($token)) {
             $this->warn('TELEGRAM_BOT_TOKEN no configurado. No se puede borrar mensajes.');
             return self::FAILURE;

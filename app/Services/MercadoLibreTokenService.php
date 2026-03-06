@@ -39,8 +39,8 @@ class MercadoLibreTokenService
      */
     public static function obtenerAccessTokenValido(): ?string
     {
-        $appId = config('services.mercado_libre.app_id');
-        $secret = config('services.mercado_libre.secret_key');
+        $appId = Configuracion::getMlAppId();
+        $secret = Configuracion::getMlSecretKey();
         if ($appId === null || $appId === '' || $secret === null || $secret === '') {
             return null;
         }
@@ -76,30 +76,37 @@ class MercadoLibreTokenService
 
     /**
      * Intercambia el código de autorización (recibido en /mercado-libre/callback) por access_token y refresh_token.
-     * Flujo estándar Authorization Code sin PKCE: grant_type, client_id, client_secret, code, redirect_uri.
+     * Documentación ML: POST con Accept: application/json, Content-Type: application/x-www-form-urlencoded.
+     * Si la app tiene PKCE activado en "Configuración de seguridad", es obligatorio enviar code_verifier.
      *
+     * @param  string|null  $codeVerifier  Obligatorio si en el login se envió code_challenge (PKCE).
      * @return array{access_token: string, refresh_token: string, expires_in: int}|null
      */
-    public static function intercambiarCodigoPorTokens(string $codigo): ?array
+    public static function intercambiarCodigoPorTokens(string $codigo, ?string $codeVerifier = null): ?array
     {
-        $appId = config('services.mercado_libre.app_id');
-        $secret = config('services.mercado_libre.secret_key');
+        $appId = Configuracion::getMlAppId();
+        $secret = Configuracion::getMlSecretKey();
         $redirectUri = config('services.mercado_libre.redirect_uri');
         if ($appId === null || $secret === null || $redirectUri === null) {
-            Log::warning('MercadoLibreTokenService: faltan ML_APP_ID, ML_SECRET_KEY o ML_REDIRECT_URI');
+            Log::warning('MercadoLibreTokenService: faltan App ID/Secret (Ajustes o .env) o ML_REDIRECT_URI');
 
             return null;
         }
 
+        $body = [
+            'grant_type' => 'authorization_code',
+            'client_id' => $appId,
+            'client_secret' => $secret,
+            'code' => $codigo,
+            'redirect_uri' => $redirectUri,
+        ];
+        if ($codeVerifier !== null && $codeVerifier !== '') {
+            $body['code_verifier'] = $codeVerifier;
+        }
+
         $respuesta = Http::withHeaders(self::headersNavegador())
             ->asForm()
-            ->post(self::URL_TOKEN, [
-                'grant_type' => 'authorization_code',
-                'client_id' => $appId,
-                'client_secret' => $secret,
-                'code' => $codigo,
-                'redirect_uri' => $redirectUri,
-            ]);
+            ->post(self::URL_TOKEN, $body);
 
         if (! $respuesta->successful()) {
             Log::warning('MercadoLibreTokenService: error al intercambiar código', [
@@ -129,8 +136,8 @@ class MercadoLibreTokenService
      */
     public static function refrescarToken(string $refreshToken): ?array
     {
-        $appId = config('services.mercado_libre.app_id');
-        $secret = config('services.mercado_libre.secret_key');
+        $appId = Configuracion::getMlAppId();
+        $secret = Configuracion::getMlSecretKey();
         if ($appId === null || $appId === '' || $secret === null || $secret === '') {
             return null;
         }

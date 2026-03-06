@@ -34,10 +34,14 @@ Para que esos jobs se ejecuten (y las ofertas lleguen a Telegram), tiene que est
 
 A partir de ahí, el worker se inicia con el servidor y se reinicia solo si se cae. Las ofertas encoladas por el rastreo se procesarán y llegarán a Telegram (si tienes configurados `TELEGRAM_CHAT_ID_PREMIUM` y/o `TELEGRAM_CHAT_ID_FREE` en `.env`).
 
+## Cola `high` (Mercado Libre, Amazon)
+
+Los jobs de **Mercado Libre** y **Amazon** se encolan en la cola `high`; el worker debe procesar ambas: `--queue=high,default`. Si el worker solo usa la cola por defecto, los mensajes de ML/Amazon no se envían a Telegram.
+
 ## Sin Supervisor (solo para pruebas)
 
 En desarrollo puedes dejar un worker manual en una terminal:
 ```bash
-php artisan queue:work database --sleep=3 --tries=3
+php artisan queue:work database --queue=high,default --sleep=3 --tries=3
 ```
 Al cerrar la terminal se deja de procesar la cola.

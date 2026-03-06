@@ -5,6 +5,7 @@ namespace App\Filament\Resources;
 use App\Fabrica\RastreadorFabrica;
 use App\Filament\Resources\ProductoResource\Pages;
 use App\Models\Producto;
+use App\Models\Tienda;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
@@ -30,11 +31,23 @@ class ProductoResource extends Resource
             ->schema([
                 Forms\Components\Section::make('General')
                     ->schema([
+                        Forms\Components\Select::make('tienda_id')
+                            ->label('Tienda')
+                            ->relationship('tienda', 'nombre')
+                            ->searchable()
+                            ->preload()
+                            ->createOptionForm([
+                                Forms\Components\TextInput::make('nombre')->required()->maxLength(80),
+                                Forms\Components\Select::make('clase_motor')->options(Tienda::clasesMotorDisponibles())->required()->searchable(),
+                                Forms\Components\Toggle::make('activo')->default(true),
+                            ])
+                            ->helperText('Si está vacío, se usa "Tienda origen" como respaldo.'),
                         Forms\Components\Select::make('tienda_origen')
-                            ->label('Tienda origen')
+                            ->label('Tienda origen (texto)')
                             ->options(self::opcionesTiendas())
                             ->searchable()
-                            ->required(),
+                            ->required()
+                            ->helperText('Nombre usado en rastreo; debe coincidir con la tienda asignada.'),
                         Forms\Components\TextInput::make('sku_tienda')
                             ->label('SKU tienda')
                             ->required()
@@ -119,11 +132,16 @@ class ProductoResource extends Resource
                     ->searchable()
                     ->sortable()
                     ->limit(40),
-                Tables\Columns\TextColumn::make('tienda_origen')
+                Tables\Columns\TextColumn::make('tienda.nombre')
                     ->label('Tienda')
+                    ->placeholder(fn (Producto $record): string => $record->tienda_origen ?? '—')
                     ->badge()
                     ->sortable()
-                    ->searchable(),
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        return $query->whereHas('tienda', fn (Builder $q): Builder =>
+                            $q->where('nombre', 'like', '%' . $search . '%'))
+                            ->orWhere('tienda_origen', 'like', '%' . $search . '%');
+                    }),
                 Tables\Columns\TextColumn::make('precio_actual')
                     ->label('Precio actual')
                     ->getStateUsing(fn (Producto $record): string => $record->precio_oferta
@@ -151,8 +169,13 @@ class ProductoResource extends Resource
                     ->alignCenter(),
             ])
             ->filters([
-                Tables\Filters\SelectFilter::make('tienda_origen')
+                Tables\Filters\SelectFilter::make('tienda_id')
                     ->label('Tienda')
+                    ->relationship('tienda', 'nombre')
+                    ->searchable()
+                    ->preload(),
+                Tables\Filters\SelectFilter::make('tienda_origen')
+                    ->label('Tienda (texto)')
                     ->options(self::opcionesTiendas()),
                 Tables\Filters\Filter::make('con_stock')
                     ->label('Con stock')

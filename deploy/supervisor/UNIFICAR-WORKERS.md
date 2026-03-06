@@ -3,7 +3,7 @@
 El proyecto debe usar **un solo** worker: **mayoreo-worker**, que procesa las colas `high` (Amazon, Mercado Libre) y `default` (resto).
 
 - **mayoreo-worker** (`deploy/supervisor/mayoreo-cloud.conf`): `queue:work --queue=high,default` → **úsalo**.
-- **laravel-queue** (`deploy/supervisor-laravel-queue.conf`): solo cola `default` → no procesa ofertas de Amazon/Mercado Libre; es redundante.
+- **laravel-queue** (`deploy/supervisor-laravel-queue.conf`): mismo comando (high,default); es redundante si también tienes mayoreo-worker.
 
 ## Pasos para unificar en el servidor
 

@@ -3,26 +3,26 @@
 namespace App\Motores;
 
 use App\Support\HttpRastreador;
+use DOMDocument;
+use DOMXPath;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Motor de rastreo para Walmart México.
- * Intenta primero endpoint interno de Deals (API); fallback: búsqueda "ofertas" y extracción desde __NEXT_DATA__/__PRELOADED_STATE__.
- * Respeta permite_descuento_adicional (aplicado en RastreoTiendaComando al encolar).
+ * Estrategia: solo scraping web (página pública de ofertas). Sin APIs internas (evita 403 Akamai).
+ * Usa HttpRastreador::getCachedOrFetch y conProxySiTexto. Referer = home de la tienda.
+ * Estructura preparada para inyección de afiliados (impact/awin): URLs limpias en url_original.
  */
 class WalmartMotor extends BaseMotorRastreador
 {
     protected const URL_BASE = 'https://www.walmart.com.mx';
 
-    /** Ruta más robusta: búsqueda "ofertas" (evita 404 de /super/ofertas). */
-    protected const RUTA_OFERTAS = 'search?q=ofertas';
+    /** Página pública de ofertas (evita /api/deals que devuelve 403). */
+    private const URL_OFERTAS = 'https://www.walmart.com.mx/ofertas';
 
-    /** Posibles rutas de API interna para Deals (probar en orden). */
-    private const API_DEALS_CANDIDATOS = [
-        '/api/deals',
-        '/super/ofertas',
-    ];
+    /** Fallback: búsqueda "ofertas" por si /ofertas no existe. */
+    private const URL_OFERTAS_FALLBACK = 'https://www.walmart.com.mx/search?q=ofertas';
 
     protected function getUrlBase(): string
     {
@@ -31,53 +31,46 @@ class WalmartMotor extends BaseMotorRastreador
 
     protected function getRutaOfertas(): string
     {
-        return self::RUTA_OFERTAS;
+        return 'ofertas';
     }
 
     /**
-     * Recolecta: primero intenta API/Deals; si no hay datos, usa búsqueda HTML + extracción JSON.
+     * Recolecta solo desde página web pública (getCachedOrFetch + conProxySiTexto).
+     * Extracción: __NEXT_DATA__ / __PRELOADED_STATE__ y fallback a selectores HTML (data-automation-id="product-tile").
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
     public function recolectarDatos(): array
     {
-        $productos = $this->recolectarDesdeApiDeals();
-        if (! empty($productos)) {
-            Log::info('WalmartMotor: productos obtenidos vía API Deals', ['cantidad' => count($productos)]);
-            return $productos;
-        }
+        $headers = HttpRastreador::headersSoloHtmlConRefererTienda(self::URL_BASE);
 
-        return parent::recolectarDatos();
-    }
+        $urls = [self::URL_OFERTAS, self::URL_OFERTAS_FALLBACK];
+        foreach ($urls as $url) {
+            try {
+                $resultado = HttpRastreador::getCachedOrFetch($url, function () use ($url, $headers): array {
+                    $request = Http::withHeaders($headers)->timeout(60)->connectTimeout(30)
+                        ->withOptions(HttpRastreador::opcionesSslBase());
+                    $request = HttpRastreador::conProxySiTexto($request, $url);
+                    $respuesta = $request->get($url);
 
-    /**
-     * Intenta obtener ofertas desde endpoint(s) de Deals. Si la API devuelve JSON con ítems, los mapea.
-     *
-     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
-     */
-    protected function recolectarDesdeApiDeals(): array
-    {
-        $cabeceras = [
-            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept' => 'application/json',
-            'Accept-Language' => 'es-MX,es;q=0.9',
-            'Referer' => self::URL_BASE . '/',
-        ];
+                    return ['body' => $respuesta->body(), 'status' => $respuesta->status()];
+                }, HttpRastreador::CACHE_PROXY_TTL);
 
-        foreach (self::API_DEALS_CANDIDATOS as $ruta) {
-            $url = rtrim(self::URL_BASE, '/') . $ruta;
-            $request = Http::withHeaders($cabeceras)->timeout(12);
-            $respuesta = HttpRastreador::conProxySiTexto($request, $url)->get($url);
-            if (! $respuesta->successful()) {
-                continue;
-            }
-            $cuerpo = $respuesta->body();
-            if (str_starts_with(trim($cuerpo), '{') || str_starts_with(trim($cuerpo), '[')) {
-                $data = $respuesta->json();
-                $items = $data['items'] ?? $data['products'] ?? $data['results'] ?? $data['itemStacks'][0]['items'] ?? (is_array($data) ? $data : []);
-                if (is_array($items) && ! empty($items)) {
-                    return $this->mapearItems($items);
+                if ($resultado['status'] < 200 || $resultado['status'] >= 300) {
+                    continue;
                 }
+
+                $productos = $this->extraerProductosDeRespuesta($resultado['body'], $url);
+                if (empty($productos)) {
+                    $productos = $this->extraerProductosDesdeHtml($resultado['body'], $url);
+                }
+                if (! empty($productos)) {
+                    Log::info('WalmartMotor: productos desde página web', ['cantidad' => count($productos), 'url' => $url]);
+
+                    return $productos;
+                }
+            } catch (\Throwable $e) {
+                Log::warning('WalmartMotor: error en petición', ['url' => $url, 'mensaje' => $e->getMessage()]);
             }
         }
 
@@ -85,8 +78,7 @@ class WalmartMotor extends BaseMotorRastreador
     }
 
     /**
-     * Extracción inteligente: busca primero en scripts JSON del HTML (más estable que parsear HTML puro).
-     * Orden: 1) __NEXT_DATA__, 2) window.__PRELOADED_STATE__. No se intenta parseo de HTML puro.
+     * Extracción: __NEXT_DATA__, __PRELOADED_STATE__ (misma lógica que antes).
      *
      * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
@@ -116,8 +108,137 @@ class WalmartMotor extends BaseMotorRastreador
     }
 
     /**
-     * Cuando la extracción falla, registra en el log qué clase de HTML se recibió para ajustar selectores.
+     * Fallback: extrae desde HTML con selectores (ej. [data-automation-id="product-tile"]).
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
      */
+    protected function extraerProductosDesdeHtml(string $body, string $urlPagina): array
+    {
+        $productos = [];
+        libxml_use_internal_errors(true);
+        $dom = new DOMDocument;
+        if (! @$dom->loadHTML('<?xml encoding="UTF-8">' . $body, LIBXML_NOERROR)) {
+            libxml_clear_errors();
+
+            return [];
+        }
+        $xpath = new DOMXPath($dom);
+
+        $contenedores = $xpath->query("//*[@data-automation-id='product-tile']");
+        if ($contenedores === false || $contenedores->length === 0) {
+            $contenedores = $xpath->query("//*[contains(@class, 'product-tile') or contains(@class, 'productTile')]");
+        }
+        if ($contenedores === false || $contenedores->length === 0) {
+            libxml_clear_errors();
+
+            return [];
+        }
+
+        foreach ($contenedores as $nodo) {
+            if (! $nodo instanceof \DOMElement) {
+                continue;
+            }
+            $nombre = $this->extraerTexto($xpath, $nodo, ".//*[contains(@class, 'product-title') or @data-automation-id='product-title']");
+            if ($nombre === '') {
+                $nombre = $this->extraerTexto($xpath, $nodo, './/a[@href]');
+            }
+            $enlace = $this->extraerHref($xpath, $nodo, './/a[@href and contains(@href, "walmart.com.mx")]');
+            $precioOriginal = $this->extraerPrecioDesdeNodo($xpath, $nodo, 'list-price', 'listPrice');
+            $precioOferta = $this->extraerPrecioDesdeNodo($xpath, $nodo, 'current-price', 'currentPrice');
+            if ($precioOferta <= 0) {
+                $precioOferta = $precioOriginal;
+            }
+            if ($precioOriginal <= 0) {
+                $precioOriginal = $precioOferta;
+            }
+            $imagenUrl = $this->extraerSrc($xpath, $nodo, './/img[contains(@src, "http")]');
+
+            if ($nombre === '' && $enlace === '') {
+                continue;
+            }
+
+            $urlOriginal = $this->normalizarUrlPublicaWalmart($enlace !== '' ? (str_starts_with($enlace, 'http') ? $enlace : self::URL_BASE . '/' . ltrim($enlace, '/')) : null);
+            $skuTienda = 'WAL-' . substr(md5($nombre ?: $enlace ?: uniqid('', true)), 0, 12);
+
+            $productos[] = [
+                'sku_tienda' => $skuTienda,
+                'nombre' => $nombre ?: 'Producto Walmart',
+                'precio_original' => round($precioOriginal, 2),
+                'precio_oferta' => $precioOferta > 0 && $precioOferta < $precioOriginal ? round($precioOferta, 2) : null,
+                'imagen_url' => $imagenUrl !== '' ? $imagenUrl : null,
+                'url_original' => $urlOriginal,
+            ];
+        }
+        libxml_clear_errors();
+
+        return array_slice($productos, 0, 50);
+    }
+
+    private function extraerTexto(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
+    {
+        $nodes = $xpath->query($expr, $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $t = $nodes->item(0)->textContent ?? '';
+
+        return trim(preg_replace('/\s+/', ' ', $t));
+    }
+
+    private function extraerHref(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
+    {
+        $nodes = $xpath->query($expr, $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $el = $nodes->item(0);
+
+        return $el instanceof \DOMElement ? trim($el->getAttribute('href') ?? '') : '';
+    }
+
+    private function extraerSrc(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
+    {
+        $nodes = $xpath->query($expr, $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $el = $nodes->item(0);
+
+        return $el instanceof \DOMElement ? trim($el->getAttribute('src') ?? '') : '';
+    }
+
+    private function extraerPrecioDesdeNodo(DOMXPath $xpath, \DOMNode $nodo, string $dataAttr, string $classPart): float
+    {
+        $nodes = $xpath->query(".//*[contains(@class, '{$classPart}') or @data-automation-id='{$dataAttr}']", $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return 0.0;
+        }
+        $texto = trim($nodes->item(0)->textContent ?? '');
+        if (preg_match('/[\d,]+\.?\d*/', $texto, $m)) {
+            return (float) str_replace(',', '', $m[0]);
+        }
+
+        return 0.0;
+    }
+
+    /**
+     * URLs públicas para auditoría; preparado para inyección de afiliado (impact/awin) en el comando.
+     */
+    protected function normalizarUrlPublicaWalmart(?string $url): ?string
+    {
+        if ($url === null || $url === '') {
+            return null;
+        }
+        if (str_contains($url, '/api/') || str_contains($url, 'myvtex.com')) {
+            return null;
+        }
+        if (! str_starts_with($url, 'http')) {
+            $url = self::URL_BASE . '/' . ltrim($url, '/');
+        }
+
+        return str_starts_with($url, 'https://www.walmart.com.mx') ? $url : null;
+    }
+
     protected function registrarRespuestaParaDebug(string $body, string $urlPagina, string $motor): void
     {
         $longitud = strlen($body);
@@ -180,10 +301,6 @@ class WalmartMotor extends BaseMotorRastreador
     }
 
     /**
-     * Normaliza un ítem crudo al formato esperado por RastrearTienda y columnas de Producto.
-     * Claves de salida: sku_tienda, nombre, precio_original, precio_oferta, imagen_url, url_original
-     * (el comando añade tienda_origen, porcentaje_ahorro, url_afiliado, ultima_actualizacion_precio, etc.).
-     *
      * @param  array<string, mixed>  $item
      * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
      */
@@ -192,11 +309,11 @@ class WalmartMotor extends BaseMotorRastreador
         $sku = (string) ($item['id'] ?? $item['sku'] ?? $item['productId'] ?? '');
         $nombre = (string) ($item['name'] ?? $item['title'] ?? $item['nombre'] ?? '');
 
-        if ($sku === '' || $nombre === '') {
+        if ($sku === '' && $nombre === '') {
             return null;
         }
 
-        $skuTienda = 'WAL-' . $sku;
+        $skuTienda = 'WAL-' . ($sku ?: substr(md5($nombre), 0, 12));
 
         $precioOriginal = isset($item['listPrice']) ? (float) $item['listPrice'] : (float) ($item['price'] ?? 0);
         $precioOferta = null;
@@ -225,11 +342,11 @@ class WalmartMotor extends BaseMotorRastreador
 
         return [
             'sku_tienda' => $skuTienda,
-            'nombre' => $nombre,
+            'nombre' => $nombre ?: 'Producto Walmart',
             'precio_original' => round($precioOriginal, 2),
             'precio_oferta' => $precioOferta !== null ? round($precioOferta, 2) : null,
             'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
-            'url_original' => $urlOriginal ? (string) $urlOriginal : null,
+            'url_original' => $this->normalizarUrlPublicaWalmart($urlOriginal),
         ];
     }
 }

@@ -34,8 +34,6 @@ class RastreadorFabrica
         'amazon' => AmazonMexicoMotor::class,
         'mercado libre' => MercadoLibreMotor::class,
         'elektra' => ElektraMotor::class,
-        'coppel' => CoppelMotor::class,
-        'calimax' => CalimaxMotor::class,
         'liverpool' => LiverpoolMotor::class,
         'bodega aurrera' => BodegaAurreraMotor::class,
         'chedraui' => ChedrauiMotor::class,
@@ -44,6 +42,8 @@ class RastreadorFabrica
         'sams club' => SamsClubMotor::class,
         'aliexpress' => AliExpressMotor::class,
         'office depot' => OfficeDepotMotor::class,
+        'coppel' => CoppelMotor::class,
+        'calimax' => CalimaxMotor::class,
     ];
 
     /**
@@ -110,8 +110,6 @@ class RastreadorFabrica
             'amazon' => 'Amazon',
             'mercado libre' => 'Mercado Libre',
             'elektra' => 'Elektra',
-            'coppel' => 'Coppel',
-            'calimax' => 'Calimax',
             'liverpool' => 'Liverpool',
             'bodega aurrera' => 'Bodega Aurrera',
             'chedraui' => 'Chedraui',
@@ -120,7 +118,26 @@ class RastreadorFabrica
             'sams club' => 'Sams Club',
             'aliexpress' => 'AliExpress',
             'office depot' => 'Office Depot',
+            'coppel' => 'Coppel',
+            'calimax' => 'Calimax',
         ];
+    }
+
+    /**
+     * Listado de tiendas con nombre y clase del motor para poblar la tabla tiendas (seeder).
+     *
+     * @return array<int, array{nombre: string, clase_motor: string}>
+     */
+    public static function listadoParaSeeder(): array
+    {
+        $nombres = self::nombresParaBD();
+        $lista = [];
+        foreach ($nombres as $clave => $nombre) {
+            if (isset(self::$motores[$clave])) {
+                $lista[] = ['nombre' => $nombre, 'clase_motor' => self::$motores[$clave]];
+            }
+        }
+        return $lista;
     }
 
     /**

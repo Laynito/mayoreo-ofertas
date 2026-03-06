@@ -13,12 +13,13 @@ class RastreoTodasLasTiendas extends Command
 
     protected $signature = 'rastreo:todas
                             {--max= : Límite de productos por tienda (opcional)}
-                            {--notificar-todos : Encolar todas las ofertas con descuento (por defecto solo nuevas o actualizadas)}';
+                            {--notificar-todos : Encolar todas las ofertas con descuento (por defecto solo nuevas o actualizadas)}
+                            {--min-discount=10 : Descuento mínimo % para Mercado Libre (por defecto 10)}';
 
-    protected $description = 'Rastrea ofertas de Calimax, Sams Club, Costco, Coppel y Elektra en orden; al final de cada una se envía el resumen a Telegram';
+    protected $description = 'Rastrea ofertas de Sams Club, Costco, Elektra, Amazon, Mercado Libre, Walmart, etc.; al final de cada una se envía el resumen a Telegram';
 
     /** Tiendas a rastrear, en orden. Pausa de 10 s entre cada una para no saturar servidor ni APIs. */
-    private const TIENDAS = ['Calimax', 'Sams Club', 'Costco', 'Coppel', 'Elektra', 'Amazon', 'Mercado Libre', 'Walmart', 'AliExpress', 'Office Depot'];
+    private const TIENDAS = ['Sams Club', 'Costco', 'Elektra', 'Amazon', 'Mercado Libre', 'Walmart', 'AliExpress', 'Office Depot'];
 
     public function __construct(
         protected CalculadoraOfertas $calculadoraOfertas
@@ -30,6 +31,7 @@ class RastreoTodasLasTiendas extends Command
     {
         $max = $this->option('max') !== null ? (int) $this->option('max') : null;
         $notificarTodos = (bool) $this->option('notificar-todos');
+        $minDiscount = $this->option('min-discount') !== null ? (int) $this->option('min-discount') : 10;
 
         $this->info('Iniciando rastreo de todas las tiendas: ' . implode(', ', self::TIENDAS));
 
@@ -50,6 +52,7 @@ class RastreoTodasLasTiendas extends Command
             $codigo = $this->runRastreo($tienda, [
                 'max' => $max,
                 'notificar_todos' => $notificarTodos,
+                'min_discount' => $minDiscount,
             ], $encoladosEstaTienda, $offsetOfertasGlobal);
 
             $offsetOfertasGlobal += $encoladosEstaTienda;
@@ -69,7 +72,7 @@ class RastreoTodasLasTiendas extends Command
         if ($fallos > 0) {
             $this->warn("Tiendas con fallo u omitidas: {$fallos}.");
         }
-        $this->comment('Para que las ofertas lleguen a Telegram, el worker de cola debe estar corriendo (automático con Supervisor: ver docs/COLA-WORKER-AUTOMATIZAR.md). Revisa .env: TELEGRAM_CHAT_ID_PREMIUM y TELEGRAM_CHAT_ID_FREE.');
+        $this->comment('Para que las ofertas lleguen a Telegram, el worker de cola debe estar corriendo (automático con Supervisor: ver docs/COLA-WORKER-AUTOMATIZAR.md). Revisa .env: TELEGRAM_CHAT_ID.');
 
         return $fallos > 0 ? 1 : 0;
     }

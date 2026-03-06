@@ -30,12 +30,19 @@ class VerificarBrowsershot extends Command
         try {
             $shot = Browsershot::url('https://example.com')
                 ->noSandbox()
-                ->addChromiumArguments([0 => 'disable-setuid-sandbox'])
+                ->addChromiumArguments(['--disable-setuid-sandbox'])
                 ->timeout(15)
                 ->windowSize(400, 300);
             $chromePath = config('browsershot.chrome_path', '');
             if ($chromePath !== '' && is_string($chromePath) && is_executable($chromePath)) {
                 $shot->setChromePath($chromePath);
+            } else {
+                foreach (['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'] as $path) {
+                    if (is_executable($path)) {
+                        $shot->setChromePath($path);
+                        break;
+                    }
+                }
             }
             $shot->save($rutaTemp);
 

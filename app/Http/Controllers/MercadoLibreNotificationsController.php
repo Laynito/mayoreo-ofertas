@@ -14,6 +14,18 @@ use Illuminate\Support\Facades\Log;
 class MercadoLibreNotificationsController extends Controller
 {
     /**
+     * Respuesta para peticiones GET (p. ej. al abrir la URL en el navegador).
+     * Evita "Method Not Allowed" y aclara que el webhook solo acepta POST.
+     */
+    public function show(): JsonResponse
+    {
+        return response()->json([
+            'message' => 'Este endpoint es para el webhook de Mercado Libre. Solo se aceptan peticiones POST.',
+            'url' => 'https://developers.mercadolibre.com',
+        ], 200);
+    }
+
+    /**
      * Acepta los avisos POST de Mercado Libre (ofertas, ítems, mensajes, etc.).
      * Responde 200 inmediatamente; el procesamiento pesado puede encolarse.
      */

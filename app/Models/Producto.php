@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Services\CalculadoraOfertas;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Producto extends Model
@@ -14,6 +15,7 @@ class Producto extends Model
     protected $table = 'productos';
 
     protected $fillable = [
+        'tienda_id',
         'tienda_origen',
         'categoria_origen',
         'sku_tienda',
@@ -26,8 +28,24 @@ class Producto extends Model
         'ultima_actualizacion_precio',
         'url_original',
         'url_afiliado',
+        'affiliate_url',
         'permite_descuento_adicional',
+        'activo',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (Producto $producto): void {
+            if ($producto->tienda_id !== null && $producto->relationLoaded('tienda') && $producto->tienda !== null) {
+                $producto->tienda_origen = $producto->tienda->nombre;
+            } elseif ($producto->tienda_id !== null) {
+                $tienda = Tienda::find($producto->tienda_id);
+                if ($tienda !== null) {
+                    $producto->tienda_origen = $tienda->nombre;
+                }
+            }
+        });
+    }
 
     protected function casts(): array
     {
@@ -37,7 +55,16 @@ class Producto extends Model
             'porcentaje_ahorro' => 'decimal:2',
             'ultima_actualizacion_precio' => 'datetime',
             'permite_descuento_adicional' => 'boolean',
+            'activo' => 'boolean',
         ];
+    }
+
+    /**
+     * Tienda a la que pertenece el producto (configuración en Administración → Tiendas).
+     */
+    public function tienda(): BelongsTo
+    {
+        return $this->belongsTo(Tienda::class);
     }
 
     /**
@@ -58,22 +85,17 @@ class Producto extends Model
     }
 
     /**
-     * URL de afiliado con formato Admitad (url_original + subid).
-     * Si url_afiliado ya está guardada, se devuelve; si no, se genera desde url_original.
+     * URL de afiliado para enviar a Telegram (botón "Ver en Tienda").
+     * Si el listener de monetización guardó url_afiliado (Admitad/Coppel, etc.), se prioriza; si no, url_original (fábrica por tienda).
      */
     public function getUrlAfiliadoCompletaAttribute(): ?string
     {
-        if ($this->url_afiliado) {
+        if (! empty($this->url_afiliado)) {
             return $this->url_afiliado;
         }
-
-        $urlOriginal = $this->url_original;
-        if (! $urlOriginal) {
-            return null;
+        if (! empty($this->url_original)) {
+            return $this->url_original;
         }
-
-        $idAdmitad = config('services.admitad.id', env('ADMITAD_SUBID', ''));
-
-        return app(CalculadoraOfertas::class)->urlAfiliadoAdmitad($urlOriginal, $idAdmitad);
+        return $this->affiliate_url;
     }
 }
