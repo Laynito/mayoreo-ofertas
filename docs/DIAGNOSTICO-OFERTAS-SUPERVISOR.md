@@ -49,7 +49,7 @@ Por tanto, en la última ejecución horaria la mayoría de ofertas que pueden sa
 
 ## 4. Qué revisar si “no llegan ofertas”
 
-1. **Horario**: `rastreo:todas` está programado **hourly** en `routes/console.php`. Comprobar que el cron de Laravel esté activo:
+1. **Horario**: `rastreo:todas` está programado **cada 30 minutos** en `routes/console.php`. Comprobar que el cron de Laravel esté activo:
    ```bash
    crontab -l
    ```

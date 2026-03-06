@@ -2,7 +2,7 @@
 
 ## Por qué no está automatizado por defecto
 
-El **rastreo** sí está automatizado: el cron ejecuta cada hora `php artisan schedule:run`, que lanza `rastreo:todas` y `ofertas:procesar-bajadas`. Esos comandos **encolan** jobs (por ejemplo `EnviarOfertaTelegramJob`) en la tabla `jobs`.
+El **rastreo** sí está automatizado: el cron ejecuta cada minuto `php artisan schedule:run`; el scheduler lanza `rastreo:todas` cada 30 minutos y `ofertas:procesar-bajadas` cada 5 minutos. Esos comandos **encolan** jobs (por ejemplo `EnviarOfertaTelegramJob`) en la tabla `jobs`.
 
 Para que esos jobs se ejecuten (y las ofertas lleguen a Telegram), tiene que estar corriendo un **proceso que consuma la cola**: `php artisan queue:work`. Ese proceso es de larga duración y no forma parte del cron; hay que levantarlo como servicio (Supervisor o systemd). Si no hay ningún worker corriendo, los jobs se quedan en la cola y las ofertas no se envían.
 

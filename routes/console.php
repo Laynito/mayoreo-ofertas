@@ -8,12 +8,13 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-// Rastreo de todas las tiendas (Calimax, Sams, Costco, Coppel, Elektra) cada hora.
-// withoutOverlapping(120): si una ejecución tarda mucho, no se lanza otra hasta que termine o pasen 120 min.
+// Rastreo de todas las tiendas (Sams, Costco, Amazon, Mercado Libre, Walmart, etc.) cada 30 minutos.
+// Así las ofertas llegan de forma más constante (al menos cada media hora).
+// withoutOverlapping(50): evita lanzar otro rastreo si el anterior sigue en curso o falló sin soltar el lock (máx 50 min).
 // onOneServer(): en entornos con varios servidores, solo uno ejecuta la tarea.
 Schedule::command('rastreo:todas')
-    ->hourly()
-    ->withoutOverlapping(120)
+    ->everyThirtyMinutes()
+    ->withoutOverlapping(50)
     ->onOneServer();
 
 // Procesar bajadas de precio y enviar ofertas según calidad (Premium/Gratis) cada 5 minutos.
