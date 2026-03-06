@@ -21,6 +21,7 @@ class Producto extends Model
         'sku_tienda',
         'nombre',
         'imagen_url',
+        'captura_url',
         'precio_original',
         'precio_oferta',
         'porcentaje_ahorro',
@@ -31,6 +32,7 @@ class Producto extends Model
         'affiliate_url',
         'permite_descuento_adicional',
         'activo',
+        'origen_rastreo',
     ];
 
     protected static function booted(): void

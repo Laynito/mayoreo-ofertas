@@ -6,12 +6,16 @@ use App\Exceptions\TelegramRateLimitException;
 use App\Models\Configuracion;
 use App\Models\NotificacionLog;
 use App\Models\Producto;
+use App\Services\MercadoLibreTokenService;
+use App\Services\MercadoLibreShortUrlService;
+use App\Support\HttpRastreador;
 use App\Models\TelegramMensajeOferta;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Spatie\Browsershot\Browsershot;
 use Spatie\Browsershot\Exceptions\CouldNotTakeBrowsershot;
 use Symfony\Component\Process\Exception\ProcessTimedOutException;
@@ -19,15 +23,20 @@ use Symfony\Component\Process\Exception\ProcessTimedOutException;
 /**
  * Notificador de ofertas vía Telegram. Un solo canal (TELEGRAM_CHAT_ID).
  * Prioridad: que la notificación nunca deje de salir.
- * Orden de imagen: 1) Browsershot (si Chrome está disponible), 2) API externa de capturas (opcional), 3) Imagen del producto (motor), 4) Solo texto.
- * Toggle enviar_imagenes: si está desactivado, se envía solo texto.
+ *
+ * Decisión única de imagen: debeEnviarConImagen() (Ajustes → Enviar imágenes).
+ * Si está desactivado, todos los flujos (ofertas nuevas y bajada histórica) envían solo texto.
+ *
+ * Orden de imagen cuando está activado: 1) Browsershot (si aplica), 2) API externa (opcional),
+ * 3) Imagen del producto (motor), 4) API ML (Items/Products), 5) Solo texto.
  */
 class NotificadorTelegram
 {
     public function __construct(
         private readonly AffiliateLinkService $affiliateLinkService,
         private readonly RedirectLinkService $redirectLinkService,
-        private readonly MercadoLibreShortUrlService $mercadoLibreShortUrlService
+        private readonly MercadoLibreShortUrlService $mercadoLibreShortUrlService,
+        private readonly NormalizadorEnlacesAfiliadoService $normalizadorEnlacesAfiliado
     ) {}
 
     /**
@@ -71,6 +80,10 @@ class NotificadorTelegram
         $urlLarga = $producto->url_original ?? $producto->affiliate_url ?? '';
         if ($urlLarga === '' || ! str_starts_with($urlLarga, 'http')) {
             return null;
+        }
+        $canonica = $this->normalizadorEnlacesAfiliado->urlMercadoLibreCanonicaCorta($urlLarga);
+        if ($canonica !== null) {
+            $urlLarga = $canonica;
         }
         $short = $this->mercadoLibreShortUrlService->acortar($urlLarga);
         $urlDisplay = ($short !== null && $short !== '') ? $short : $urlLarga;
@@ -126,6 +139,15 @@ class NotificadorTelegram
     private const HORAS_ANTES_REENVIAR_OFERTA = 12;
 
     /**
+     * Punto único de decisión: si las notificaciones deben llevar imagen/captura.
+     * Cuando es false, todos los flujos (ofertas nuevas y bajada histórica) envían solo texto.
+     */
+    private function debeEnviarConImagen(): bool
+    {
+        return Configuracion::enviarImagenes();
+    }
+
+    /**
      * Notifica una oferta: captura de pantalla (Browsershot) de la página del producto al canal principal.
      * Si la captura falla, se envía solo texto. Evita duplicados en HORAS_ANTES_REENVIAR_OFERTA.
      */
@@ -135,7 +157,7 @@ class NotificadorTelegram
         $requiereAdicional = Configuracion::requiereDescuentoAdicional();
 
         if ($requiereAdicional && ! $producto->permite_descuento_adicional) {
-            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Producto no permite descuento adicional', null);
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Producto no permite descuento adicional', null, $producto->origen_rastreo ?? null);
             return;
         }
 
@@ -145,7 +167,7 @@ class NotificadorTelegram
                 'producto_id' => $producto->id,
                 'sku_tienda' => $producto->sku_tienda,
             ]);
-            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Ningún canal configurado (Chat ID)', null);
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Ningún canal configurado (Chat ID)', null, $producto->origen_rastreo ?? null);
             return;
         }
 
@@ -155,22 +177,23 @@ class NotificadorTelegram
                 'producto_id' => $producto->id,
                 'sku_tienda' => $producto->sku_tienda,
             ]);
-            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Ya enviado recientemente (duplicado)', null);
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Ya enviado recientemente (duplicado)', null, $producto->origen_rastreo ?? null);
             return;
         }
 
         $token = Configuracion::getTelegramToken();
         if (empty($token)) {
             Log::debug('NotificadorTelegram: TELEGRAM_BOT_TOKEN no configurado.');
-            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Bot Token no configurado', null);
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, null, NotificacionLog::ESTADO_OMITIDO, 'Bot Token no configurado', null, $producto->origen_rastreo ?? null);
             return;
         }
 
-        if (! Configuracion::enviarImagenes()) {
+        if (! $this->debeEnviarConImagen()) {
+            Log::info('NotificadorTelegram: enviar_imagenes desactivado en Ajustes; envío solo texto (sin capturas).', ['producto_id' => $producto->id]);
             $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
             $this->enviarOfertaSoloTextoADestinos($producto, $porcentaje, $destinos);
             foreach ($destinos as $destino) {
-                NotificacionLog::registrar($producto->id, $producto->tienda_origen, $destino['chat_id'], NotificacionLog::ESTADO_ENVIADO, null, $urlAfiliado);
+                NotificacionLog::registrar($producto->id, $producto->tienda_origen, $destino['chat_id'], NotificacionLog::ESTADO_ENVIADO, null, $urlAfiliado, $producto->origen_rastreo ?? null);
             }
             Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
             return;
@@ -187,7 +210,7 @@ class NotificadorTelegram
         $this->enviarConCapturaOFallbackADestinos($token, $destinos, $producto, $urlAfiliado, 'NotificadorTelegram: producto sin URL para captura de oferta');
 
         foreach ($destinos as $destino) {
-            NotificacionLog::registrar($producto->id, $producto->tienda_origen, $destino['chat_id'], NotificacionLog::ESTADO_ENVIADO, null, $urlAfiliado);
+            NotificacionLog::registrar($producto->id, $producto->tienda_origen, $destino['chat_id'], NotificacionLog::ESTADO_ENVIADO, null, $urlAfiliado, $producto->origen_rastreo ?? null);
         }
         try {
             Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
@@ -221,9 +244,39 @@ class NotificadorTelegram
      *
      * @param  array<int, array{chat_id: string, caption: string}>  $destinos
      */
+    /**
+     * Detecta si el producto es de Mercado Libre (por tienda o por URL). Para ML no usamos captura web (evita pantalla de login).
+     */
+    private function esProductoMercadoLibre(Producto $producto, ?string $urlPagina = null): bool
+    {
+        if (trim($producto->tienda_origen ?? '') === 'Mercado Libre') {
+            return true;
+        }
+        $url = $urlPagina ?? $producto->url_original ?? '';
+        return $url !== '' && str_contains($url, 'mercadolibre.com');
+    }
+
     private function enviarConCapturaOFallbackADestinos(string $token, array $destinos, Producto $producto, ?string $urlAfiliado, string $mensajeLogSinUrl): void
     {
         $urlPagina = $producto->url_original ?? $urlAfiliado;
+        $esMercadoLibre = $this->esProductoMercadoLibre($producto, $urlPagina);
+
+        // ——— Mercado Libre: no enviar ofertas sin enlace (evita TypeError y mensajes inútiles sin botón "Ver en Tienda").
+        if ($esMercadoLibre) {
+            $urlPaginaStr = (string) ($urlPagina ?? '');
+            $tieneEnlace = trim($urlPaginaStr) !== '' || trim($urlAfiliado ?? '') !== '';
+            if (! $tieneEnlace) {
+                Log::warning('NotificadorTelegram: producto ML sin enlace — no se envía oferta', [
+                    'producto_id' => $producto->id,
+                    'nombre' => $producto->nombre,
+                    'sku_tienda' => $producto->sku_tienda,
+                ]);
+                return;
+            }
+            $this->enviarOfertaMercadoLibreSoloImagenApi($token, $destinos, $producto, $urlAfiliado, $urlPaginaStr);
+            return;
+        }
+
         $captionFallback = "\n\n🖼️ (Captura no disponible)";
 
         if (empty($urlPagina) || ! str_starts_with($urlPagina, 'http')) {
@@ -234,37 +287,31 @@ class NotificadorTelegram
             return;
         }
 
-        // No usar Browsershot para URLs de tracking (click1, mclics): no son página de producto y llenan logs de error.
         $esUrlTracking = str_contains($urlPagina, 'click1.mercadolibre') || str_contains($urlPagina, 'mclics');
-        if ($esUrlTracking) {
-            Log::info('NotificadorTelegram: URL de tracking ML detectada, omitiendo Browsershot.', [
-                'producto_id' => $producto->id,
-                'tienda' => $producto->tienda_origen,
-            ]);
-        }
+        $omitirBrowsershot = $esUrlTracking;
 
         $contenidoCaptura = null;
-        if (! $esUrlTracking && $this->chromeDisponible()) {
+        if (! $omitirBrowsershot && $this->chromeDisponible()) {
             $contenidoCaptura = $this->capturarPantallaProductoConReintentos($urlPagina, $producto->id);
-        } elseif (! $esUrlTracking) {
+        } elseif (! $omitirBrowsershot) {
             Log::info('NotificadorTelegram: Chrome no disponible, omitiendo Browsershot.', [
                 'producto_id' => $producto->id,
             ]);
         }
 
-        if ($contenidoCaptura === null && ! $esUrlTracking) {
+        if ($contenidoCaptura === null && ! $omitirBrowsershot) {
             $contenidoCaptura = $this->capturarConApiExterna($urlPagina, $producto->id);
         }
 
         if ($contenidoCaptura !== null && $contenidoCaptura !== '') {
+            $this->guardarCapturaEnProducto($contenidoCaptura, $producto->id);
             foreach ($destinos as $destino) {
                 $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenidoCaptura, $destino['caption'], $urlAfiliado, $producto->id);
             }
             return;
         }
 
-        // Fallback: usar imagen del listado (imagen_url) extraída por el motor — prioridad: que la notificación siempre salga.
-        // Las imágenes se descargan siempre por IP directa del VPS (sin proxy) para no consumir GB del proxy.
+        // Otras tiendas: fallback a imagen del motor si existe.
         $imagenUrl = $producto->imagen_url ?? '';
         if ($imagenUrl !== '' && str_starts_with($imagenUrl, 'http')) {
             $contenidoImagen = $this->descargarImagenListado($imagenUrl);
@@ -273,6 +320,7 @@ class NotificadorTelegram
                     'producto_id' => $producto->id,
                     'tienda' => $producto->tienda_origen,
                 ]);
+                $this->guardarCapturaEnProducto($contenidoImagen, $producto->id);
                 $sufijoListado = "\n\n🖼️ (Imagen del producto)";
                 foreach ($destinos as $destino) {
                     $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenidoImagen, $destino['caption'] . $sufijoListado, $urlAfiliado, $producto->id);
@@ -291,35 +339,245 @@ class NotificadorTelegram
         }
     }
 
+    /** URL de imagen de relleno para probar envío ML cuando no hay imagen del producto (logo ML). */
+    private const ML_IMAGEN_PRUEBA = 'https://http2.mlstatic.com/frontend-assets/ml-extras/navigation/logo-desktop-v2.png';
+
     /**
-     * Descarga la imagen del producto para Telegram. NUNCA usa proxy: solo IP directa del VPS.
-     * El proxy se usa únicamente para el GET inicial del HTML; las imágenes no consumen GB del proxy.
+     * Flujo Mercado Libre: siempre sendPhoto. Si no hay imagen del producto, se usa imagen de prueba para diagnosticar.
+     *
+     * @param  array<int, array{chat_id: string, caption: string}>  $destinos
+     */
+    private function enviarOfertaMercadoLibreSoloImagenApi(string $token, array $destinos, Producto $producto, ?string $urlAfiliado, string $urlPagina): void
+    {
+        $sufijoListado = "\n\n🖼️ (Imagen del producto)";
+        $sufijoImagenPrueba = "\n\n🖼️ (Imagen de prueba: producto sin URL de imagen)";
+        $sinEnlace = trim($urlAfiliado ?? '') === '' && trim($producto->url_original ?? '') === '';
+        $sufijoSinEnlace = $sinEnlace ? "\n\n⚠️ Enlace no disponible para este producto." : '';
+
+        Log::info('NotificadorTelegram: Mercado Libre — forzando sendPhoto (sin envío solo texto).', [
+            'producto_id' => $producto->id,
+            'sin_enlace' => $sinEnlace,
+        ]);
+
+        // ML: enviar siempre por multipart (descargar + attach). Telegram no puede descargar desde mlstatic.com (imagen rota); nosotros sí.
+        $imagenUrl = $producto->imagen_url ?? '';
+        if ($imagenUrl !== '' && str_starts_with($imagenUrl, 'http')) {
+            $contenido = $this->descargarImagenListado($imagenUrl);
+            if ($contenido !== null && $contenido !== '') {
+                Log::info('NotificadorTelegram: ML — sendPhoto multipart (motor/API rastreo).', ['producto_id' => $producto->id]);
+                $this->guardarCapturaEnProducto($contenido, $producto->id);
+                foreach ($destinos as $destino) {
+                    $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenido, $destino['caption'] . $sufijoListado . $sufijoSinEnlace, $urlAfiliado, $producto->id);
+                }
+                return;
+            }
+        }
+
+        $imagenUrlApi = MercadoLibreImagenApiService::getImagenUrl($producto);
+        if ($imagenUrlApi !== null && $imagenUrlApi !== '') {
+            $contenido = $this->descargarImagenListado($imagenUrlApi);
+            if ($contenido !== null && $contenido !== '') {
+                Log::info('NotificadorTelegram: ML — sendPhoto multipart (API Items/Products).', ['producto_id' => $producto->id]);
+                $this->guardarCapturaEnProducto($contenido, $producto->id);
+                $this->actualizarImagenUrlSiVacia($producto, $imagenUrlApi);
+                foreach ($destinos as $destino) {
+                    $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenido, $destino['caption'] . $sufijoListado . $sufijoSinEnlace, $urlAfiliado, $producto->id);
+                }
+                return;
+            }
+        }
+
+        $imagenUrlOg = $this->obtenerImagenUrlOpenGraphMercadoLibreVariosUserAgents($urlPagina);
+        if ($imagenUrlOg !== null && $imagenUrlOg !== '') {
+            $contenido = $this->descargarImagenListado($imagenUrlOg);
+            if ($contenido !== null && $contenido !== '') {
+                Log::info('NotificadorTelegram: ML — sendPhoto multipart (og:image).', ['producto_id' => $producto->id]);
+                $this->guardarCapturaEnProducto($contenido, $producto->id);
+                foreach ($destinos as $destino) {
+                    $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenido, $destino['caption'] . $sufijoListado . $sufijoSinEnlace, $urlAfiliado, $producto->id);
+                }
+                return;
+            }
+        }
+
+        // Sin imagen del producto: descargar logo ML y enviar por multipart (así se ve; por URL Telegram no la carga).
+        $contenidoPrueba = $this->descargarImagenListado(self::ML_IMAGEN_PRUEBA);
+        if ($contenidoPrueba !== null && $contenidoPrueba !== '') {
+            Log::warning('NotificadorTelegram: ML sin imagen producto; enviando logo por multipart.', ['producto_id' => $producto->id]);
+            foreach ($destinos as $destino) {
+                $this->enviarFotoConCaptura($token, $destino['chat_id'], $contenidoPrueba, $destino['caption'] . $sufijoImagenPrueba . $sufijoSinEnlace, $urlAfiliado, $producto->id);
+            }
+            return;
+        }
+        foreach ($destinos as $destino) {
+            $this->enviarFotoConUrl($token, $destino['chat_id'], self::ML_IMAGEN_PRUEBA, $destino['caption'] . $sufijoImagenPrueba . $sufijoSinEnlace, $urlAfiliado, $producto->id);
+        }
+    }
+
+    /**
+     * Persiste imagen_url en el producto cuando se obtuvo desde la API (evita llamar API en cada notificación).
+     */
+    private function actualizarImagenUrlSiVacia(Producto $producto, string $imagenUrl): void
+    {
+        $actual = $producto->imagen_url ?? '';
+        if ($actual === '' && $imagenUrl !== '') {
+            $producto->imagen_url = $imagenUrl;
+            $producto->save();
+            Log::info('NotificadorTelegram: producto ML actualizado con imagen_url desde API', ['producto_id' => $producto->id]);
+        }
+    }
+
+    /**
+     * Obtiene la URL de la imagen del producto como hace WhatsApp: pide la página con User-Agent
+     * de "link preview" (WhatsApp/Facebook) y extrae og:image del HTML. ML suele devolver la ficha
+     * con meta tags en lugar de redirigir a login para estos bots.
+     *
+     * @return string|null URL de og:image o null si falla o la imagen no parece de producto (ej. logo ML).
+     */
+    /**
+     * Intenta obtener og:image con un User-Agent dado. Prueba WhatsApp y Telegram por si ML devuelve ficha solo a uno.
+     */
+    private function obtenerImagenUrlOpenGraphMercadoLibre(string $urlProducto, string $userAgent = 'WhatsApp/2.23.20.0 A'): ?string
+    {
+        if ($urlProducto === '' || ! str_contains($urlProducto, 'mercadolibre')) {
+            return null;
+        }
+        try {
+            $headers = [
+                'User-Agent' => $userAgent,
+                'Accept' => 'text/html,application/xhtml+xml',
+                'Accept-Language' => 'es-MX,es;q=0.9',
+            ];
+            $request = Http::withHeaders($headers)->timeout(12)->connectTimeout(6);
+            $request = HttpRastreador::conProxySiTexto($request, $urlProducto);
+            $response = $request->get($urlProducto);
+
+            if (! $response->successful()) {
+                return null;
+            }
+
+            $html = $response->body();
+            if ($html === '' || strlen($html) < 500) {
+                return null;
+            }
+
+            if (preg_match('/<meta[^>]+property\s*=\s*["\']og:image["\'][^>]+content\s*=\s*["\']([^"\']+)["\']/i', $html, $m) ||
+                preg_match('/<meta[^>]+content\s*=\s*["\']([^"\']+)["\'][^>]+property\s*=\s*["\']og:image["\']/i', $html, $m)) {
+                $url = trim($m[1]);
+                if ($url !== '' && str_starts_with($url, 'http') && str_contains($url, 'mlstatic.com')) {
+                    return $url;
+                }
+            }
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /** Prueba og:image con varios User-Agents (WhatsApp, Telegram, Googlebot) por si ML solo entrega ficha a alguno. */
+    private function obtenerImagenUrlOpenGraphMercadoLibreVariosUserAgents(string $urlProducto): ?string
+    {
+        $userAgents = [
+            'WhatsApp/2.23.20.0 A',
+            'TelegramBot (like TwitterBot)',
+            'Googlebot/2.1 (+http://www.google.com/bot.html)',
+        ];
+        foreach ($userAgents as $ua) {
+            $url = $this->obtenerImagenUrlOpenGraphMercadoLibre($urlProducto, $ua);
+            if ($url !== null) {
+                return $url;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Descarga la imagen del producto (para multipart o para guardar en producto).
+     * Para ML, Walmart y Sams: usa proxy (conProxy) y Referer de la tienda para evitar 403 del CDN.
+     * verify => false evita fallos por certificados SSL del proxy.
+     * Verifica que el cuerpo sea imagen (JPEG/PNG/GIF); si es HTML, registra error y devuelve null.
      */
     private function descargarImagenListado(string $imagenUrl): ?string
     {
         try {
-            $response = Http::timeout(15)->connectTimeout(5)->get($imagenUrl);
+            $esMl = str_contains($imagenUrl, 'mlstatic.com') || str_contains($imagenUrl, 'mercadolibre');
+            $esWalmart = str_contains($imagenUrl, 'walmart.com') || str_contains($imagenUrl, 'walmartimages');
+            $esSams = str_contains($imagenUrl, 'sams.com.mx') || str_contains($imagenUrl, 'samsclub');
+            $headers = [
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept' => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            ];
+            if ($esMl) {
+                $headers['Referer'] = 'https://www.mercadolibre.com.mx/';
+            } elseif ($esWalmart) {
+                $headers['Referer'] = 'https://www.walmart.com.mx/';
+            } elseif ($esSams) {
+                $headers['Referer'] = 'https://www.sams.com.mx/';
+            }
+
+            $usarProxy = $esMl || $esWalmart || $esSams;
+            $request = Http::withOptions(['verify' => false])
+                ->withHeaders($headers)
+                ->timeout(15)
+                ->connectTimeout(5);
+
+            if ($usarProxy) {
+                // conProxy: evita 403 de CDNs (ML, Walmart, Sams) cuando la descarga se hace desde el servidor.
+                $request = HttpRastreador::conProxy($request);
+            }
+
+            $response = $request->get($imagenUrl);
+
             if (! $response->successful()) {
+                Log::debug('NotificadorTelegram: descarga imagen no exitosa', ['url' => $imagenUrl, 'status' => $response->status()]);
                 return null;
             }
+
             $body = $response->body();
             if ($body === '' || strlen($body) < 100) {
                 return null;
             }
+
+            if ($this->esHtmlEnLugarDeImagen($body)) {
+                Log::error('ML Descarga fallida: Se recibió HTML en lugar de imagen', ['url' => $imagenUrl]);
+                return null;
+            }
+
+            if (! $this->esCuerpoImagenValida($body)) {
+                Log::debug('NotificadorTelegram: respuesta no es imagen válida (magic bytes)', ['url' => $imagenUrl]);
+                return null;
+            }
+
             $contentType = $response->header('Content-Type', '');
-            if (! str_contains($contentType, 'image/')) {
+            if ($contentType !== '' && ! str_contains($contentType, 'image/')) {
+                Log::debug('NotificadorTelegram: respuesta no es imagen', ['url' => $imagenUrl, 'content-type' => $contentType]);
                 return null;
             }
 
             return $body;
         } catch (\Throwable $e) {
-            Log::debug('NotificadorTelegram: no se pudo descargar imagen del listado', [
+            Log::warning('NotificadorTelegram: no se pudo descargar imagen del listado', [
                 'url' => $imagenUrl,
                 'error' => $e->getMessage(),
             ]);
-
             return null;
         }
+    }
+
+    private function esHtmlEnLugarDeImagen(string $body): bool
+    {
+        $inicio = ltrim($body);
+        return str_starts_with($inicio, '<!') || str_starts_with($inicio, '<html');
+    }
+
+    private function esCuerpoImagenValida(string $body): bool
+    {
+        if (strlen($body) < 4) {
+            return false;
+        }
+        return str_starts_with($body, "\xFF\xD8\xFF")
+            || str_starts_with($body, "\x89PNG")
+            || str_starts_with($body, "GIF");
     }
 
     /**
@@ -438,11 +696,11 @@ class NotificadorTelegram
             return;
         }
 
-        if ($bajada >= 30) {
+        $caption = $this->construirCaptionBajadaHistorica($producto, $precioAyer, $precioHoy, $bajada);
+        $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
+        if ($bajada >= 30 && $this->debeEnviarConImagen()) {
             $this->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy, (string) $idCanal);
         } else {
-            $caption = $this->construirCaptionBajadaHistorica($producto, $precioAyer, $precioHoy, $bajada);
-            $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
             $this->enviarMensajeSinFoto($token, (string) $idCanal, $caption, $urlAfiliado, $producto->id);
         }
         Cache::put($claveDuplicado, true, now()->addHours(self::HORAS_ANTES_REENVIAR_OFERTA));
@@ -477,11 +735,25 @@ class NotificadorTelegram
             return;
         }
 
-        $this->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy, (string) $idCanal);
+        if ($this->debeEnviarConImagen()) {
+            $this->notificarBajadaHistoricaConCaptura($producto, $precioAyer, $precioHoy, (string) $idCanal);
+        } else {
+            $token = Configuracion::getTelegramToken();
+            if (! empty($token)) {
+                $caption = $this->construirCaptionBajadaHistorica(
+                    $producto,
+                    $precioAyer,
+                    $precioHoy,
+                    $porcentajeBajada
+                );
+                $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
+                $this->enviarMensajeSinFoto($token, (string) $idCanal, $caption, $urlAfiliado, $producto->id);
+            }
+        }
     }
 
     /**
-     * Notifica una bajada histórica de precio con captura de pantalla de la página del producto.
+     * Notifica una bajada histórica de precio. Respeta enviar_imagenes: si está desactivado, envía solo texto.
      * Si se pasa $chatId se usa ese canal; si no, se usa TELEGRAM_CHAT_ID (bajada ≥ 10%).
      */
     public function notificarBajadaHistoricaConCaptura(Producto $producto, float $precioAyer, float $precioHoy, ?string $chatId = null): void
@@ -502,6 +774,12 @@ class NotificadorTelegram
 
         $caption = $this->construirCaptionBajadaHistorica($producto, $precioAyer, $precioHoy, $porcentajeBajada);
         $urlAfiliado = $this->urlParaBotonVerEnTienda($producto);
+
+        if (! $this->debeEnviarConImagen()) {
+            $this->enviarMensajeSinFoto($token, $chatId, $caption, $urlAfiliado, $producto->id);
+            return;
+        }
+
         $this->enviarConCapturaOFallback(
             $token,
             $chatId,
@@ -629,9 +907,15 @@ class NotificadorTelegram
      */
     private function capturarPantallaProducto(string $urlPagina, int $productoId): ?string
     {
+        // Mercado Libre redirige a login con headless; no intentar captura web (se usa solo imagen API/motor).
+        if (str_contains($urlPagina, 'mercadolibre.com')) {
+            Log::debug('NotificadorTelegram: Browsershot omitido para URL ML (modo API).', ['producto_id' => $productoId]);
+            return null;
+        }
+
         $timeout = config('browsershot.timeout', 45);
         $esCalimax = str_contains($urlPagina, 'calimax.com.mx');
-        $esMercadoLibre = str_contains($urlPagina, 'mercadolibre.com');
+        $esMercadoLibre = false;
         if ($esCalimax) {
             $timeout = max($timeout, 45);
             Log::info('NotificadorTelegram: intentando captura Browsershot para Calimax', [
@@ -750,6 +1034,24 @@ class NotificadorTelegram
     }
 
     /**
+     * Guarda la captura de pantalla en storage y actualiza producto.captura_url para mostrarla en el sitio web.
+     */
+    private function guardarCapturaEnProducto(string $contenidoCaptura, int $productoId): void
+    {
+        try {
+            $path = 'ofertas/producto_' . $productoId . '.png';
+            Storage::disk('public')->put($path, $contenidoCaptura);
+            $url = asset('storage/' . $path);
+            Producto::where('id', $productoId)->update(['captura_url' => $url]);
+        } catch (\Throwable $e) {
+            Log::debug('NotificadorTelegram: no se pudo guardar captura en producto', [
+                'producto_id' => $productoId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
      * Intenta obtener una captura de pantalla vía API externa (ej. ScreenshotLayer).
      * Solo se usa como fallback cuando Browsershot no está disponible o falla.
      * Config: services.captura_api.url y services.captura_api.key (opcional según proveedor).
@@ -803,10 +1105,59 @@ class NotificadorTelegram
     }
 
     /**
-     * Envía la foto (captura) a Telegram. Si se pasa $productoId, guarda el message_id para limpieza posterior.
+     * Envía la foto a Telegram: primero sendPhoto(photo=URL). Si Telegram no puede descargar la URL (ej. ML bloquea a Telegram),
+     * fallback: descargamos nosotros la imagen y la enviamos por multipart (sendPhoto con attach).
+     */
+    private function enviarFotoConUrl(string $token, string $chatId, string $imagenUrl, string $caption, ?string $urlAfiliado, ?int $productoId = null): void
+    {
+        Log::info('DEBUG IMAGEN:', ['url' => $imagenUrl, 'metodo' => 'sendPhoto']);
+        Log::emergency('DEBUG_FOTO_ML: ' . $imagenUrl);
+
+        $urlApi = "https://api.telegram.org/bot{$token}/sendPhoto";
+        $payload = [
+            'chat_id' => $chatId,
+            'photo' => $imagenUrl,
+            'caption' => $caption,
+            'parse_mode' => 'HTML',
+        ];
+        if (! empty($urlAfiliado)) {
+            $payload['reply_markup'] = json_encode([
+                'inline_keyboard' => [
+                    [['text' => 'Ver en Tienda', 'url' => $urlAfiliado]],
+                ],
+            ]);
+        }
+
+        $response = Http::withOptions(['verify' => false])
+            ->timeout(25)
+            ->connectTimeout(8)
+            ->post($urlApi, $payload);
+
+        $this->asegurarNoRateLimit($response);
+        if ($response->successful()) {
+            $messageId = $response->json('result.message_id');
+            if ($messageId !== null && is_numeric($messageId)) {
+                $this->registrarMensajeOferta($chatId, (int) $messageId, $productoId);
+            }
+            return;
+        }
+
+        // Fallback: Telegram no pudo descargar la URL (ej. CDN bloquea a Telegram). Descargamos nosotros y enviamos multipart.
+        Log::info('NotificadorTelegram: sendPhoto(URL) falló; intentando envío por multipart (imagen descargada).', [
+            'status' => $response->status(),
+        ]);
+        $contenido = $this->descargarImagenListado($imagenUrl);
+        if ($contenido !== null && $contenido !== '') {
+            $this->enviarFotoConCaptura($token, $chatId, $contenido, $caption, $urlAfiliado, $productoId);
+        }
+    }
+
+    /**
+     * Envía la foto (contenido binario) a Telegram. Para ML preferir enviarFotoConUrl (photo=URL).
      */
     private function enviarFotoConCaptura(string $token, string $chatId, string $contenidoImagen, string $caption, ?string $urlAfiliado, ?int $productoId = null): void
     {
+        Log::info('DEBUG IMAGEN:', ['url' => '(binario)', 'metodo' => 'sendPhoto_multipart']);
         Log::info('Enviando mensaje al Chat ID: ' . $chatId);
         $urlApi = "https://api.telegram.org/bot{$token}/sendPhoto";
         $payload = [
@@ -822,10 +1173,11 @@ class NotificadorTelegram
             ]);
         }
 
+        [$nombreArchivo, $contentType] = $this->tipoImagenParaAdjuntoTelegram($contenidoImagen);
         $response = Http::withOptions(['verify' => false])
             ->timeout(20)
             ->connectTimeout(5)
-            ->attach('photo', $contenidoImagen, 'captura-oferta.png')
+            ->attach('photo', $contenidoImagen, $nombreArchivo, ['Content-Type' => $contentType])
             ->post($urlApi, $payload);
 
         $this->asegurarNoRateLimit($response);
@@ -840,6 +1192,25 @@ class NotificadorTelegram
         if ($messageId !== null && is_numeric($messageId)) {
             $this->registrarMensajeOferta($chatId, (int) $messageId, $productoId);
         }
+    }
+
+    /**
+     * Devuelve [nombreArchivo, Content-Type] para sendPhoto multipart. Telegram necesita el MIME correcto para mostrar la imagen.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function tipoImagenParaAdjuntoTelegram(string $contenido): array
+    {
+        if (strlen($contenido) >= 3 && str_starts_with($contenido, "\xFF\xD8\xFF")) {
+            return ['captura-oferta.jpg', 'image/jpeg'];
+        }
+        if (strlen($contenido) >= 4 && str_starts_with($contenido, "\x89PNG")) {
+            return ['captura-oferta.png', 'image/png'];
+        }
+        if (strlen($contenido) >= 3 && str_starts_with($contenido, "GIF")) {
+            return ['captura-oferta.gif', 'image/gif'];
+        }
+        return ['captura-oferta.png', 'image/png'];
     }
 
     /**

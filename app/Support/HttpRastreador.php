@@ -192,6 +192,15 @@ final class HttpRastreador
     }
 
     /**
+     * Invalida la caché de proxy para una URL. Útil cuando se detecta bloqueo (ej. "Verifica tu identidad")
+     * para que la siguiente petición no use la respuesta cacheada y pueda usar otra IP si el proxy rota.
+     */
+    public static function invalidarCacheProxy(string $url): void
+    {
+        Cache::forget('proxy_html_' . md5($url));
+    }
+
+    /**
      * Con proxy activo, devuelve http:// para api.mercadolibre.com (evita Error 35 en Hostinger).
      * El proxy hace HTTPS hacia ML; la salida desde el servidor es HTTP.
      */

@@ -76,18 +76,46 @@ final class NormalizadorEnlacesAfiliadoService
         if ($url === '') {
             return '';
         }
-        return (string) preg_replace('#[\?#].*$#', '', $url);
+        return (string) preg_replace('/[\?#].*$/', '', $url);
     }
 
     /**
-     * Normaliza la URL para Mercado Libre: primero deja solo scheme+host+path (sin query ni fragmento),
-     * luego añade el parámetro de afiliado para que el enlace muestre el producto correctamente.
-     * Construcción: si la URL limpia no tiene ?, se añade ?micosmtics=187001804; si tuviera ?, &micosmtics=...
+     * Si la URL es de producto catálogo ML (contiene /p/MLM...), devuelve la forma corta canónica
+     * para evitar 404 o redirección a login por slug desactualizado.
+     * Ejemplo: .../hidrolavadora-electrica-.../p/MLM53177027?... → https://www.mercadolibre.com.mx/p/MLM53177027?micosmtics=...
+     */
+    public function urlMercadoLibreCanonicaCorta(string $url): ?string
+    {
+        $url = trim($url);
+        if ($url === '' || ! str_contains($url, 'mercadolibre')) {
+            return null;
+        }
+        if (preg_match('/\/p\/(MLM\d+)/i', $url, $m)) {
+            $idCatalogo = $m[1];
+            $idAfiliado = Configuracion::getMlAffiliateId() ?: self::ID_AFILIADO_DEFECTO;
+            $idAfiliado = $idAfiliado !== '' ? $idAfiliado : self::ID_AFILIADO_DEFECTO;
+            $host = str_contains($url, 'mercadolibre.com.mx') ? 'www.mercadolibre.com.mx' : 'www.mercadolibre.com.ar';
+            if (preg_match('/mercadolibre\.(com\.[a-z]{2})/', $url, $dom)) {
+                $host = 'www.mercadolibre.' . $dom[1];
+            }
+            return 'https://' . $host . '/p/' . $idCatalogo . '?micosmtics=' . $idAfiliado;
+        }
+        return null;
+    }
+
+    /**
+     * Normaliza la URL para Mercado Libre: usa forma corta canónica si es /p/MLM...; si no, deja solo scheme+host+path
+     * y añade micosmtics. Evita slugs largos que llevan a "página no encontrada" o login.
      */
     public function normalizarUrlMercadoLibre(string $url): ?string
     {
         if ($url === '') {
             return null;
+        }
+
+        $corta = $this->urlMercadoLibreCanonicaCorta($url);
+        if ($corta !== null) {
+            return $corta;
         }
 
         $limpia = $this->urlMercadoLibreSoloPath($url);
@@ -96,7 +124,6 @@ final class NormalizadorEnlacesAfiliadoService
             return null;
         }
 
-        // Prioridad manual: si no hay ID en BD/.env (app no certificada), usar siempre 187001804 para que el bot nunca deje de publicar.
         $idAfiliado = Configuracion::getMlAffiliateId() ?: self::ID_AFILIADO_DEFECTO;
         $idAfiliado = $idAfiliado !== '' ? $idAfiliado : self::ID_AFILIADO_DEFECTO;
         $suffix = 'micosmtics=' . $idAfiliado;

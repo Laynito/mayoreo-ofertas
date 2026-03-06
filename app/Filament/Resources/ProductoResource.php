@@ -25,6 +25,22 @@ class ProductoResource extends Resource
 
     protected static ?string $pluralModelLabel = 'Productos';
 
+    /**
+     * URL de la imagen del producto para mostrar en la tabla (captura guardada o imagen del motor).
+     * Convierte rutas relativas (storage/...) a URL absoluta para que Filament la muestre bien.
+     */
+    public static function urlImagenProducto(Producto $record): ?string
+    {
+        $url = $record->captura_url ?: $record->imagen_url;
+        if ($url === null || $url === '') {
+            return null;
+        }
+        if (! str_starts_with($url, 'http://') && ! str_starts_with($url, 'https://')) {
+            return asset(ltrim($url, '/'));
+        }
+        return $url;
+    }
+
     public static function form(Form $form): Form
     {
         return $form
@@ -124,9 +140,10 @@ class ProductoResource extends Resource
     {
         return $table
             ->columns([
-                Tables\Columns\ImageColumn::make('imagen_url')
-                    ->label('Imagen')
+                Tables\Columns\ImageColumn::make('imagen_producto')
+                    ->label('FOTO')
                     ->rounded()
+                    ->getStateUsing(fn (Producto $record): ?string => self::urlImagenProducto($record))
                     ->defaultImageUrl(fn ($record) => 'https://ui-avatars.com/api/?name=' . urlencode($record->nombre ?? '') . '&size=64'),
                 Tables\Columns\TextColumn::make('nombre')
                     ->searchable()

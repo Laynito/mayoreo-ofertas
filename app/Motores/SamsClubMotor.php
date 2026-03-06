@@ -141,7 +141,7 @@ class SamsClubMotor extends BaseMotorRastreador
             $precioTexto = $this->extraerTexto($xpath, $nodo, './/*[contains(@class, "price")]');
             $precioOferta = $this->parsearPrecio($precioTexto);
             $precioOriginal = $precioOferta;
-            $imagenUrl = $this->extraerSrc($xpath, $nodo, './/img[@src]');
+            $imagenUrl = $this->extraerImagenUrlConLazy($xpath, $nodo);
 
             if ($nombre === '' && $enlace === '') {
                 continue;
@@ -195,6 +195,55 @@ class SamsClubMotor extends BaseMotorRastreador
         $el = $nodes->item(0);
 
         return $el instanceof \DOMElement ? trim($el->getAttribute('src') ?? '') : '';
+    }
+
+    /**
+     * Extrae URL de imagen probando src, data-src, data-srcset, srcset (Sam's usa lazy load).
+     */
+    private function extraerImagenUrlConLazy(DOMXPath $xpath, \DOMNode $nodo): string
+    {
+        $nodes = $xpath->query('.//img', $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $el = $nodes->item(0);
+        if (! $el instanceof \DOMElement) {
+            return '';
+        }
+        $attrs = ['src', 'data-src', 'data-srcset', 'srcset'];
+        foreach ($attrs as $attr) {
+            $v = trim((string) $el->getAttribute($attr));
+            if ($v !== '') {
+                if (($attr === 'data-srcset' || $attr === 'srcset') && str_contains($v, ',')) {
+                    $v = trim(explode(',', $v)[0]);
+                    if (preg_match('/^(\S+)/', $v, $m)) {
+                        $v = $m[1];
+                    }
+                }
+                if ($v !== '') {
+                    return $this->normalizarUrlImagenSams($v);
+                }
+            }
+        }
+        return '';
+    }
+
+    private function normalizarUrlImagenSams(string $url): string
+    {
+        $url = trim($url);
+        if ($url === '') {
+            return '';
+        }
+        if (str_starts_with($url, 'http://') || str_starts_with($url, 'https://')) {
+            return $url;
+        }
+        if (str_starts_with($url, '//')) {
+            return 'https:' . $url;
+        }
+        if (str_starts_with($url, '/')) {
+            return self::URL_BASE . $url;
+        }
+        return self::URL_BASE . '/' . ltrim($url, '/');
     }
 
     private function parsearPrecio(string $texto): float

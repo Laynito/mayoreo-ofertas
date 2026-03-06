@@ -81,6 +81,13 @@ trait RastreoTiendaComando
 
         if (empty($items)) {
             $this->warn('No se encontraron productos.');
+            if ($tiendaOrigen === 'Mercado Libre') {
+                $this->line('');
+                $this->line('  Para Mercado Libre revisa:');
+                $this->line('  • OAuth: Admin → Mercado Libre (o Ajustes) y vincula tu cuenta si no lo has hecho.');
+                $this->line('  • Diagnóstico: <comment>php artisan mercado-libre:diagnostico</comment>');
+                $this->line('  • Logs: <comment>grep -i "MercadoLibreMotor" storage/logs/laravel.log</comment>');
+            }
             return 0;
         }
 
@@ -168,6 +175,7 @@ trait RastreoTiendaComando
                 'categoria_origen' => $categoria,
                 'permite_descuento_adicional' => $permite,
                 'activo' => $activo,
+                'origen_rastreo' => $item['origen_rastreo'] ?? null,
                 'created_at' => $now,
                 'updated_at' => $now,
             ];
@@ -186,7 +194,7 @@ trait RastreoTiendaComando
         Producto::upsert($rows, ['tienda_origen', 'sku_tienda'], [
             'tienda_id', 'nombre', 'imagen_url', 'precio_original', 'precio_oferta', 'porcentaje_ahorro',
             'stock_disponible', 'ultima_actualizacion_precio', 'url_original', 'url_afiliado', 'affiliate_url',
-            'categoria_origen', 'permite_descuento_adicional', 'activo', 'updated_at',
+            'categoria_origen', 'permite_descuento_adicional', 'activo', 'origen_rastreo', 'updated_at',
         ]);
 
         $productosPorSku = Producto::query()
@@ -214,12 +222,11 @@ trait RastreoTiendaComando
             HistorialPrecio::insert($historialInserts);
         }
 
-        $porcentajeMinimo = Configuracion::porcentajeMinimoNotificacion();
         $requiereDescuentoAdicional = Configuracion::requiereDescuentoAdicional();
 
         // Lógica de encolado:
         // - Solo productos con descuento real (precio_oferta < precio_original).
-        // - Mercado Libre: solo notificar si el descuento es >= min_discount (por defecto 15%; --min-discount=N para cambiar).
+        // - Mercado Libre: solo notificar si el descuento es >= min_discount (por defecto 10%; --min-discount=0 para todas).
         // - Si "Solo productos con descuento adicional" está activo, se excluyen permite_descuento_adicional = false.
         // Todas las que pasen el filtro se encolan al canal principal.
         $query = Producto::query()
@@ -234,17 +241,6 @@ trait RastreoTiendaComando
             $query->where('permite_descuento_adicional', true);
         }
 
-        if ($notificarTodos) {
-            // todos los de la tienda en BD con descuento suficiente
-        } else {
-            $skusConCambio = array_column($historialCandidates, 'sku_tienda');
-            if (! empty($skusConCambio)) {
-                $query->whereIn('sku_tienda', $skusConCambio);
-            } else {
-                $query->whereRaw('1 = 0');
-            }
-        }
-
         $query->orderByDesc('porcentaje_ahorro');
         $productosParaTelegram = $query->get();
         $encolados = $productosParaTelegram->count();
@@ -255,11 +251,22 @@ trait RastreoTiendaComando
             ->whereNotNull('precio_oferta')
             ->count();
 
-        $soloNovedadesSinCambios = ! $notificarTodos && empty(array_column($historialCandidates, 'sku_tienda'));
-        if ($soloNovedadesSinCambios && $encolados === 0 && $totalConDescuento > 0) {
-            $this->warn("Encolados: 0 (solo se encolan novedades con cambio de precio; este rastreo no tuvo cambios). Usa --notificar-todos para encolar todas las ofertas con descuento.");
-        } elseif ($requiereDescuentoAdicional && $totalConDescuento > $encolados && ! $soloNovedadesSinCambios) {
-            $this->warn("Filtro activo: solo productos con 'permite descuento adicional'. Excluidos: " . ($totalConDescuento - $encolados) . " de {$totalConDescuento}. Desactívalo en Configuración → Notificaciones para enviar todas.");
+        $excluidos = $totalConDescuento - $encolados;
+        if ($excluidos > 0) {
+            $razones = [];
+            if ($tiendaOrigen === 'Mercado Libre') {
+                $razones[] = "descuento < {$minDiscount}% (usa --min-discount=0 para encolar todas)";
+            }
+            if ($requiereDescuentoAdicional) {
+                $razones[] = "filtro 'permite descuento adicional' (Configuración → Notificaciones)";
+            }
+            $this->line(sprintf(
+                '  → %d de %d con descuento cumplen filtros. Excluidos: %d (%s).',
+                $encolados,
+                $totalConDescuento,
+                $excluidos,
+                implode('; ', $razones)
+            ));
         }
 
         // Novedades (solo con cambio de precio): evento PrecioBajo → listeners monetizan y encolan. --notificar-todos: encolado directo.
@@ -295,12 +302,9 @@ trait RastreoTiendaComando
 
         $this->info('Procesados: ' . count($items) . ' productos.');
         $this->info('Registros en historial de precios: ' . count($historialInserts) . '.');
-        $msgEncolados = $notificarTodos
-            ? 'Encolados para Telegram: ' . $encolados . ' ofertas.'
-            : 'Encolados para Telegram (solo novedades ≥' . $porcentajeMinimo . '%): ' . $encolados . ' ofertas.';
-        $this->info($msgEncolados);
+        $this->info('Encolados para Telegram: ' . $encolados . ' ofertas.');
         if ($encolados === 0 && count($items) > 0) {
-            $this->warn("Cero ofertas encoladas para [{$tiendaOrigen}]. Para enviar todas las ofertas con descuento: php artisan rastreo:tienda \"{$tiendaOrigen}\" --notificar-todos");
+            $this->warn("Cero ofertas encoladas para [{$tiendaOrigen}]. Revisa --min-discount (ej. --min-discount=0) y filtro 'permite descuento adicional' en Configuración.");
         }
 
         return 0;

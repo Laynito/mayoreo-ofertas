@@ -4,6 +4,7 @@ namespace App\Motores;
 
 use App\Models\Configuracion;
 use App\Services\EstadoMotorService;
+use App\Services\MercadoLibreTokenService;
 use App\Support\HttpRastreador;
 use DOMDocument;
 use DOMXPath;
@@ -11,10 +12,11 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Motor de rastreo para Mercado Libre México.
+ * Motor híbrido para Mercado Libre México: API de promociones (prioridad) y scraping como respaldo.
  *
- * - Fuente: página de ofertas (mercadolibre.com.mx/ofertas). Peticiones envueltas con getCachedOrFetch (caché 10 min).
- * - Comisión: micosmtics=187001804 se mantiene siempre al final de cada URL (ML_AFFILIATE_ID en .env).
+ * - Si hay access_token válido, intenta GET api.mercadolibre.com/promotions/search?site_id=MLM&type=ALL (con proxy).
+ * - Si la API falla (403, token expirado, app no certificada), ejecuta rastreoPorScraping() (página de ofertas HTML).
+ * - Comisión: micosmtics=187001804 en todas las URLs.
  */
 class MercadoLibreMotor extends BaseMotorRastreador
 {
@@ -22,7 +24,10 @@ class MercadoLibreMotor extends BaseMotorRastreador
 
     protected const RUTA_OFERTAS = 'ofertas';
 
-    /** URL de la página de ofertas (fuente principal). */
+    /** API de promociones (prioridad cuando hay token). */
+    private const URL_PROMOTIONS_API = 'https://api.mercadolibre.com/promotions/search?site_id=MLM&type=ALL';
+
+    /** URL de la página de ofertas (scraping). */
     private const URL_OFERTAS = 'https://www.mercadolibre.com.mx/ofertas';
 
     /** URL de búsqueda segura para validar túnel si ofertas falla (403/SSL). */
@@ -42,16 +47,165 @@ class MercadoLibreMotor extends BaseMotorRastreador
     }
 
     /**
-     * Recolecta productos desde la página de ofertas (HTML). Retraso humano 0.5–2 s antes de la petición.
-     * Si ofertas falla (403/SSL), intenta búsqueda segura /instax para validar túnel.
+     * Motor híbrido: intenta primero API de promociones (con token y proxy); si falla, scraping.
      *
-     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null, origen_rastreo?: string}>
      */
     public function recolectarDatos(): array
     {
+        $token = MercadoLibreTokenService::obtenerAccessTokenValido();
+        if ($token !== null && $token !== '') {
+            $productos = $this->obtenerOfertasViaApi();
+            if (! empty($productos)) {
+                return $productos;
+            }
+            Log::info('MercadoLibreMotor: API de promociones sin ítems; intentando scraping.');
+        } else {
+            Log::info('MercadoLibreMotor: sin token OAuth; usando solo scraping.');
+        }
+
+        $productos = $this->rastreoPorScraping();
+        if (empty($productos)) {
+            Log::warning('MercadoLibreMotor: no se encontraron productos (API y scraping vacíos). Revisa: OAuth (Admin → Mercado Libre), proxy en Ajustes y storage/logs/laravel.log.');
+        }
+        return $productos;
+    }
+
+    /**
+     * Obtiene ofertas vía API de promociones. Usa proxy configurado en Ajustes para evitar cURL 35 y bloqueos.
+     * Mapea price, original_price, id, permalink/url al formato estándar (nombre, precio_original, precio_oferta, url_original).
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null, origen_rastreo: string}>
+     */
+    public function obtenerOfertasViaApi(): array
+    {
+        $token = MercadoLibreTokenService::obtenerAccessTokenValido();
+        if ($token === null || $token === '') {
+            Log::debug('MercadoLibreMotor: sin token, no se intenta API de promociones.');
+            return [];
+        }
+
+        $apiUrl = Configuracion::getProxyUrl() !== null
+            ? HttpRastreador::urlApiMlParaProxy(self::URL_PROMOTIONS_API)
+            : self::URL_PROMOTIONS_API;
+
+        try {
+            $request = Http::withHeaders(HttpRastreador::headersNavegador())
+                ->withToken($token)
+                ->timeout(25)
+                ->connectTimeout(15)
+                ->withOptions(HttpRastreador::opcionesSslBase());
+            $request = HttpRastreador::conProxy($request);
+            $response = $request->get($apiUrl);
+        } catch (\Throwable $e) {
+            Log::warning('MercadoLibreMotor: API promociones falló (conexión)', ['mensaje' => $e->getMessage()]);
+            return [];
+        }
+
+        if ($response->status() === 403) {
+            Log::debug('MercadoLibreMotor: API promociones 403 esperado (app no certificada); pasando a scraping sin error.');
+            return [];
+        }
+        if ($response->status() !== 200) {
+            Log::warning('MercadoLibreMotor: API promociones respuesta no 200', ['status' => $response->status()]);
+            return [];
+        }
+
+        $data = $response->json();
+        if (! is_array($data)) {
+            return [];
+        }
+
+        $items = $data['results'] ?? $data['content'] ?? $data['promotions'] ?? $data['items'] ?? [];
+        if (! is_array($items) || empty($items)) {
+            Log::debug('MercadoLibreMotor: API promociones sin ítems en la respuesta.');
+            return [];
+        }
+
+        $productos = [];
+        foreach (array_slice($items, 0, 80) as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $normalizado = $this->mapearItemApiPromociones($item);
+            if ($normalizado !== null) {
+                $normalizado['origen_rastreo'] = 'API';
+                $productos[] = $normalizado;
+            }
+        }
+
+        if (! empty($productos)) {
+            Log::info('MercadoLibreMotor: ofertas obtenidas vía API de promociones (con proxy)', ['cantidad' => count($productos)]);
+            app(EstadoMotorService::class)->reactivar('Mercado Libre');
+        }
+
+        return $productos;
+    }
+
+    /**
+     * Mapea un ítem de la API de promociones al formato estándar (nombre, precio_original, precio_oferta, url_original, etc.).
+     *
+     * @param  array<string, mixed>  $item
+     * @return array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}|null
+     */
+    private function mapearItemApiPromociones(array $item): ?array
+    {
+        $id = (string) ($item['id'] ?? $item['item_id'] ?? '');
+        $nombre = (string) ($item['title'] ?? $item['name'] ?? '');
+        if ($id === '' && $nombre === '') {
+            return null;
+        }
+
+        $precio = (float) ($item['price'] ?? $item['sale_price'] ?? 0);
+        $precioOriginal = (float) ($item['original_price'] ?? $item['price'] ?? 0);
+        if ($precioOriginal <= 0) {
+            $precioOriginal = $precio;
+        }
+        if ($precio <= 0) {
+            $precio = $precioOriginal;
+        }
+
+        $permalink = $item['permalink'] ?? $item['url'] ?? $item['link'] ?? '';
+        if (is_string($permalink) && $permalink !== '' && ! str_starts_with($permalink, 'http')) {
+            $permalink = self::URL_BASE . '/' . ltrim($permalink, '/');
+        }
+        $urlOriginal = is_string($permalink) && $permalink !== ''
+            ? self::inyectarAfiliadoEnPermalink($permalink)
+            : null;
+
+        $imagenUrl = $item['thumbnail'] ?? $item['picture'] ?? $item['thumbnail_id'] ?? $item['thumbnail_url'] ?? $item['image'] ?? $item['picture_url'] ?? $item['photo'] ?? null;
+        if ($imagenUrl === null || $imagenUrl === '') {
+            $pictures = $item['pictures'] ?? $item['images'] ?? null;
+            if (is_array($pictures) && isset($pictures[0])) {
+                $first = is_array($pictures[0]) ? ($pictures[0]['url'] ?? $pictures[0]['secure_url'] ?? null) : null;
+                $imagenUrl = $first;
+            }
+        }
+        if ($imagenUrl !== null && is_string($imagenUrl) && $imagenUrl !== '' && ! str_starts_with($imagenUrl, 'http')) {
+            $imagenUrl = 'https://http2.mlstatic.com/D_NQ_NP_' . ltrim((string) $imagenUrl, '/') . '-O.jpg';
+        }
+
+        $sku = 'ML-' . ($id ?: substr(md5($nombre), 0, 12));
+
+        return [
+            'sku_tienda' => $sku,
+            'nombre' => $nombre ?: 'Producto Mercado Libre',
+            'precio_original' => round($precioOriginal > 0 ? $precioOriginal : $precio, 2),
+            'precio_oferta' => $precio > 0 ? round($precio, 2) : null,
+            'imagen_url' => $imagenUrl ? (string) $imagenUrl : null,
+            'url_original' => $urlOriginal,
+        ];
+    }
+
+    /**
+     * Rastreo por scraping (página de ofertas HTML). Respaldo cuando la API falla o no hay token.
+     *
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null, origen_rastreo: string}>
+     */
+    private function rastreoPorScraping(): array
+    {
         usleep(random_int(500000, 2000000));
 
-        // Solo cuerpo HTML (sin imágenes, fuentes ni scripts) para ahorrar GB en proxy.
         $headers = HttpRastreador::headersSoloHtml();
 
         try {
@@ -65,15 +219,14 @@ class MercadoLibreMotor extends BaseMotorRastreador
             }, HttpRastreador::CACHE_PROXY_TTL);
         } catch (\Throwable $e) {
             Log::warning('[Mercado Libre] Error de conexión/proxy (ofertas): ' . $e->getMessage());
-            return $this->intentarFallbackBusqueda($headers);
+            return $this->agregarOrigenScraping($this->intentarFallbackBusqueda($headers));
         }
 
         if ($resultado['status'] < 200 || $resultado['status'] >= 300) {
-            Log::debug('MercadoLibreMotor: respuesta no exitosa', ['status' => $resultado['status'], 'url' => self::URL_OFERTAS]);
             if ($resultado['status'] === 403) {
                 Log::info('MercadoLibreMotor: 403 en página ofertas. Intentando fallback de búsqueda.');
             }
-            return $this->intentarFallbackBusqueda($headers);
+            return $this->agregarOrigenScraping($this->intentarFallbackBusqueda($headers));
         }
 
         $productos = $this->extraerProductosDesdeHtmlOfertas($resultado['body'], self::URL_OFERTAS);
@@ -83,16 +236,29 @@ class MercadoLibreMotor extends BaseMotorRastreador
 
         if (! empty($productos)) {
             $usaProxy = Configuracion::getProxyUrl() !== null;
-            Log::info('MercadoLibreMotor: productos extraídos desde página ofertas' . ($usaProxy ? ' (con proxy)' : ''), [
+            Log::info('MercadoLibreMotor: productos extraídos por scraping (página ofertas)' . ($usaProxy ? ' (con proxy)' : ''), [
                 'cantidad' => count($productos),
-                'con_proxy' => $usaProxy,
             ]);
             app(EstadoMotorService::class)->reactivar('Mercado Libre');
-
-            return $productos;
+        } else {
+            Log::debug('MercadoLibreMotor: scraping sin productos (HTML de ofertas sin ítems reconocidos).');
         }
 
-        return parent::recolectarDatos();
+        return $this->agregarOrigenScraping($productos);
+    }
+
+    /**
+     * Añade origen_rastreo = 'Scraping' a cada ítem del array.
+     *
+     * @param  array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null}>  $productos
+     * @return array<int, array{sku_tienda: string, nombre: string, precio_original: float, precio_oferta: float|null, imagen_url: string|null, url_original: string|null, origen_rastreo: string}>
+     */
+    private function agregarOrigenScraping(array $productos): array
+    {
+        foreach ($productos as $i => $p) {
+            $productos[$i]['origen_rastreo'] = 'Scraping';
+        }
+        return $productos;
     }
 
     /**
@@ -180,12 +346,26 @@ class MercadoLibreMotor extends BaseMotorRastreador
             $enlace = $this->filtrarEnlaceTrackingMl($enlace);
             // Precios desde aria-label ("Antes: X pesos" / "Ahora: X pesos") para evitar mezclar fracciones
             $fracciones = $this->extraerPreciosDesdeAriaLabel($xpath, $nodo);
+            // Selectores actualizados: poly-component__picture, poly-card__portada (nuevo diseño ML), data-testid, lazy (data-src/srcset)
             $imagenUrl = $this->extraerImagenXpath($xpath, $nodo, ".//img[contains(@class, 'poly-component__picture')]");
+            if ($imagenUrl === '') {
+                $imagenUrl = $this->extraerImagenXpath($xpath, $nodo, ".//*[contains(@class, 'poly-card__portada')]//img");
+            }
             if ($imagenUrl === '') {
                 $imagenUrl = $this->extraerImagenXpath($xpath, $nodo, ".//*[@data-testid='picture']//img");
             }
             if ($imagenUrl === '') {
-                $imagenUrl = $this->extraerImagenXpath($xpath, $nodo, ".//img[contains(@src, 'http')]");
+                $imagenUrl = $this->extraerImagenXpath($xpath, $nodo, ".//img[contains(@src, 'http') or @data-src or @data-srcset or @srcset]");
+            }
+            if ($imagenUrl === '') {
+                $imagenUrl = $this->extraerImagenXpath($xpath, $nodo, ".//img");
+            }
+
+            $nombreLog = $titulo ?: 'Producto Mercado Libre';
+            if ($imagenUrl !== '') {
+                Log::info('ML Motor: Producto ' . $nombreLog . ' - Imagen detectada: ' . $imagenUrl);
+            } else {
+                Log::info('ML Motor: Producto ' . $nombreLog . ' - Imagen no detectada');
             }
 
             if ($titulo === '' && $enlace === '') {
@@ -220,6 +400,9 @@ class MercadoLibreMotor extends BaseMotorRastreador
         return array_slice($productos, 0, 50);
     }
 
+    /**
+     * Extrae URL de imagen del primer nodo que coincida. Prueba src, data-src y data-lazy-src (ML usa lazy-load).
+     */
     private function extraerImagenXpath(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
     {
         $nodes = $xpath->query($expr, $nodo);
@@ -227,9 +410,47 @@ class MercadoLibreMotor extends BaseMotorRastreador
             return '';
         }
         $first = $nodes->item(0);
-        $src = $first instanceof \DOMElement ? $first->getAttribute('src') : '';
+        if (! $first instanceof \DOMElement) {
+            return '';
+        }
+        $attrs = ['src', 'data-src', 'data-lazy-src', 'data-srcset', 'srcset'];
+        foreach ($attrs as $attr) {
+            $valor = trim((string) $first->getAttribute($attr));
+            if ($valor !== '') {
+                if (($attr === 'data-srcset' || $attr === 'srcset') && str_contains($valor, ',')) {
+                    $valor = trim(explode(',', $valor)[0]);
+                    if (preg_match('/^(\S+)/', $valor, $m)) {
+                        $valor = $m[1];
+                    }
+                }
+                if ($valor !== '') {
+                    return $this->normalizarUrlImagenMl($valor);
+                }
+            }
+        }
+        return '';
+    }
 
-        return trim($src);
+    /** Convierte URL relativa o protocol-relative a absoluta para mlstatic.com. */
+    private function normalizarUrlImagenMl(string $url): string
+    {
+        $url = trim($url);
+        if ($url === '') {
+            return '';
+        }
+        if (str_starts_with($url, 'http://') || str_starts_with($url, 'https://')) {
+            return $url;
+        }
+        if (str_starts_with($url, '//')) {
+            return 'https:' . $url;
+        }
+        if (str_starts_with($url, '/')) {
+            return 'https://http2.mlstatic.com' . $url;
+        }
+        if (! str_contains($url, '://')) {
+            return 'https://http2.mlstatic.com/' . ltrim($url, '/');
+        }
+        return $url;
     }
 
     private function extraerTextoXpath(DOMXPath $xpath, \DOMNode $nodo, string $expr): string
@@ -424,7 +645,8 @@ class MercadoLibreMotor extends BaseMotorRastreador
         if ($precioOferta <= 0) {
             $precioOferta = $precio;
         }
-        $imagenUrl = $item['thumbnail'] ?? $item['picture'] ?? null;
+        $imagenUrl = $item['thumbnail'] ?? $item['picture'] ?? $item['thumbnail_url'] ?? $item['image'] ?? null;
+        $imagenUrl = is_string($imagenUrl) && $imagenUrl !== '' ? $this->normalizarUrlImagenMl($imagenUrl) : null;
         $permalink = $item['permalink'] ?? $item['url'] ?? null;
         if (is_string($permalink) && ! str_starts_with($permalink, 'http')) {
             $permalink = self::URL_BASE . '/' . ltrim($permalink, '/');
@@ -433,6 +655,12 @@ class MercadoLibreMotor extends BaseMotorRastreador
             $permalink = HttpRastreador::expandirUrlCorta($permalink);
         }
         $urlOriginal = $permalink ? self::inyectarAfiliadoEnPermalink((string) $permalink) : null;
+        $nombreLog = $nombre ?: 'Producto Mercado Libre';
+        if ($imagenUrl !== null && $imagenUrl !== '') {
+            Log::info('ML Motor: Producto ' . $nombreLog . ' - Imagen detectada: ' . $imagenUrl);
+        } else {
+            Log::info('ML Motor: Producto ' . $nombreLog . ' - Imagen no detectada');
+        }
 
         return [
             'sku_tienda' => $sku,

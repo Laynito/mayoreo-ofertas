@@ -56,6 +56,9 @@ final class DiagnosticoConexionService
         }
 
         if (! $response->successful()) {
+            if ($response->status() === 403) {
+                return ['ok' => false, 'mensaje' => 'API en modo restringido por falta de certificación. Usando motor de respaldo (Scraping) exitosamente.', 'modo_scraping' => true];
+            }
             $body = $response->json();
             $mensaje = $body['message'] ?? $response->body();
 

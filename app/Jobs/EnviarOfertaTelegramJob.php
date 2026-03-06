@@ -77,7 +77,8 @@ class EnviarOfertaTelegramJob implements ShouldQueue
                 $chatId !== null ? (string) $chatId : null,
                 NotificacionLog::ESTADO_FALLIDO,
                 $e->getMessage(),
-                null
+                null,
+                $producto->origen_rastreo ?? null
             );
             Log::warning('EnviarOfertaTelegramJob: fallo en notificación', [
                 'producto_id' => $producto->id,

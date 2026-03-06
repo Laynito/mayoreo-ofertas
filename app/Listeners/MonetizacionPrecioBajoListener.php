@@ -14,6 +14,9 @@ class MonetizacionPrecioBajoListener
         private readonly AffiliateLinkService $affiliateLinkService
     ) {}
 
+    /**
+     * Punto de entrada que Laravel usa para listeners (handle o __invoke).
+     */
     public function handle(PrecioBajo $event): void
     {
         $producto = $event->producto;
@@ -27,5 +30,13 @@ class MonetizacionPrecioBajoListener
             $producto->url_afiliado = $urlMonetizada;
             $producto->saveQuietly();
         }
+    }
+
+    /**
+     * Invocable: delega en handle() por si Laravel llama al listener como invocable.
+     */
+    public function __invoke(PrecioBajo $event): void
+    {
+        $this->handle($event);
     }
 }

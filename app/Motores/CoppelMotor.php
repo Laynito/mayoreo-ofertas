@@ -2,7 +2,7 @@
 
 namespace App\Motores;
 
-use App\Models\Configuracion;
+use App\Support\HttpRastreador;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -128,11 +128,7 @@ class CoppelMotor extends BaseMotorRastreador
         $headers['Accept'] = 'text/x-component';
         $headers['RSC'] = '1';
 
-        $opciones = ['verify' => false];
-        $proxy = Configuracion::getProxyUrl();
-        if ($proxy !== null && $proxy !== '') {
-            $opciones['proxy'] = $proxy;
-        }
+        $opciones = HttpRastreador::opcionesProxy();
 
         $responses = Http::pool(function ($pool) use ($requests, $headers, $opciones) {
             foreach ($requests as $key => $req) {

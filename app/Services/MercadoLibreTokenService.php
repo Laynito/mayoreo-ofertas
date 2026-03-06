@@ -80,13 +80,13 @@ class MercadoLibreTokenService
      * Si la app tiene PKCE activado en "Configuración de seguridad", es obligatorio enviar code_verifier.
      *
      * @param  string|null  $codeVerifier  Obligatorio si en el login se envió code_challenge (PKCE).
-     * @return array{access_token: string, refresh_token: string, expires_in: int}|null
+     * @return array{access_token: string, refresh_token: string, expires_in: int}|array{error: string, error_description: string}|null  Tokens, error de ML (invalid_grant, invalid_operator_user_id, etc.) o null si faltan credenciales.
      */
     public static function intercambiarCodigoPorTokens(string $codigo, ?string $codeVerifier = null): ?array
     {
         $appId = Configuracion::getMlAppId();
         $secret = Configuracion::getMlSecretKey();
-        $redirectUri = config('services.mercado_libre.redirect_uri');
+        $redirectUri = Configuracion::getMlRedirectUri();
         if ($appId === null || $secret === null || $redirectUri === null) {
             Log::warning('MercadoLibreTokenService: faltan App ID/Secret (Ajustes o .env) o ML_REDIRECT_URI');
 
@@ -109,12 +109,16 @@ class MercadoLibreTokenService
             ->post(self::URL_TOKEN, $body);
 
         if (! $respuesta->successful()) {
+            $data = $respuesta->json();
+            $error = is_array($data) ? ($data['error'] ?? 'unknown') : 'unknown';
+            $errorDescription = is_array($data) ? ($data['error_description'] ?? $respuesta->body()) : $respuesta->body();
             Log::warning('MercadoLibreTokenService: error al intercambiar código', [
                 'status' => $respuesta->status(),
-                'body' => $respuesta->body(),
+                'error' => $error,
+                'error_description' => $errorDescription,
             ]);
 
-            return null;
+            return ['error' => $error, 'error_description' => $errorDescription];
         }
 
         $data = $respuesta->json();

@@ -187,11 +187,18 @@ class Configuracion extends Model
         return $env !== null && $env !== '' ? (string) $env : null;
     }
 
-    /** App ID de Mercado Libre (BD prioridad sobre .env). */
+    /** App ID de Mercado Libre (BD prioridad sobre .env). Clave: ML_APP_ID / services.mercado_libre.app_id. */
     public static function getMlAppId(): ?string
     {
         $v = self::obtener(self::CLAVE_ML_APP_ID);
         return $v !== null && $v !== '' ? (string) $v : config('services.mercado_libre.app_id');
+    }
+
+    /** Redirect URI OAuth Mercado Libre. Clave: ML_REDIRECT_URI / services.mercado_libre.redirect_uri. */
+    public static function getMlRedirectUri(): ?string
+    {
+        $v = config('services.mercado_libre.redirect_uri');
+        return $v !== null && $v !== '' ? (string) $v : null;
     }
 
     /** Secret Key de Mercado Libre (BD prioridad sobre .env). */

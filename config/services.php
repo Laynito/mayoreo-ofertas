@@ -112,6 +112,8 @@ return [
         'secret_key' => env('ML_SECRET_KEY'),
         'redirect_uri' => env('ML_REDIRECT_URI'),
         'affiliate_id' => env('ML_AFFILIATE_ID', '187001804'),
+        // Dominio de autorización por país (doc ML: cambiar .com.ar por el país). Ej: mercadolibre.com.mx, mercadolibre.com.ar
+        'auth_domain' => env('ML_AUTH_DOMAIN', 'mercadolibre.com.mx'),
     ],
     'elektra' => [
         'proxy' => env('ELEKTRA_HTTP_PROXY'),

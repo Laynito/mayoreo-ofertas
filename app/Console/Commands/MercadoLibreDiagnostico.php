@@ -65,11 +65,19 @@ class MercadoLibreDiagnostico extends Command
             $this->line('Expira en: no definido');
         }
 
+        $tokenValido = null;
         if (empty($access)) {
             $this->warn('Access token no guardado (opcional para este diagnóstico).');
         } else {
             $tokenValido = MercadoLibreTokenService::obtenerAccessTokenValido();
             $this->line('Token válido: ' . ($tokenValido ? '✓' : '✗ (no se usa en la prueba de API)'));
+        }
+
+        $pruebaTokenOk = false;
+        if ($tokenValido !== null && $tokenValido !== '') {
+            $this->newLine();
+            $this->info('--- Prueba de API (CON TOKEN, OAuth) ---');
+            $pruebaTokenOk = $this->ejecutarPruebaConToken($tokenValido);
         }
 
         $this->newLine();
@@ -116,8 +124,41 @@ class MercadoLibreDiagnostico extends Command
         $this->error('La API devolvió ' . $status . '. Cuerpo: ' . mb_substr($body, 0, 300));
         if ($status === 403) {
             $this->newLine();
-            $this->warn('403 (tengine/PolicyAgent). Sin reintento con token. Rotar sesión del proxy en PROXY_URL (ej. otro session-XXX en Smartproxy).');
+            if ($pruebaTokenOk) {
+                $this->warn('403 en petición pública (sin token). No afecta al rastreo: el motor usa el token y la prueba CON TOKEN ya confirmó que OAuth funciona.');
+                return self::SUCCESS;
+            }
+            $this->warn('403 (tengine/PolicyAgent). Rota sesión del proxy en PROXY_URL (ej. otro session-XXX en Smartproxy).');
         }
         return self::FAILURE;
+    }
+
+    /** Prueba GET /users/me con Bearer token (misma lógica que el motor y el panel de diagnóstico). Devuelve true si 200. */
+    private function ejecutarPruebaConToken(string $token): bool
+    {
+        $url = 'https://api.mercadolibre.com/users/me';
+        $proxy = Configuracion::getProxyUrl();
+        if ($proxy !== null && $proxy !== '') {
+            $url = HttpRastreador::urlApiMlParaProxy($url);
+        }
+        $request = Http::withHeaders(HttpRastreador::headersNavegador())
+            ->withToken($token)
+            ->timeout(25)
+            ->connectTimeout(15);
+        $request = HttpRastreador::conProxy($request);
+        $respuesta = $request->get($url);
+        $status = $respuesta->status();
+
+        $this->line('GET ' . $url . ' (Authorization: Bearer ...)');
+        $this->line('HTTP status: ' . $status);
+
+        if ($respuesta->successful()) {
+            $data = $respuesta->json();
+            $nick = $data['nickname'] ?? $data['id'] ?? 'OK';
+            $this->info('API con token: ✓ Conexión OAuth correcta (usuario: ' . $nick . ').');
+            return true;
+        }
+        $this->error('API con token: fallo ' . $status . '. Revisa token o re-conecta desde /mercado-libre/login.');
+        return false;
     }
 }

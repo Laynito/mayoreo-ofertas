@@ -10,24 +10,30 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
- * Flujo OAuth de Mercado Libre: login (redirige a ML), callback (intercambia código por tokens).
- * Cumple documentación oficial: state (CSRF), PKCE (code_challenge/code_verifier), Accept/Content-Type en /oauth/token.
+ * Flujo OAuth de Mercado Libre según documentación oficial:
+ * https://developers.mercadolibre.com.mx/es_ar/autenticacion-y-autorizacion
+ *
+ * Checklist implementado:
+ * 1) Autorización: GET auth.mercadolibre.{país}/authorization con response_type=code, client_id, redirect_uri
+ *    (exacto al registrado), state (CSRF), code_challenge + code_challenge_method=S256 (PKCE). Dominio por país vía ML_AUTH_DOMAIN.
+ * 2) Intercambio code por token: POST api.mercadolibre.com/oauth/token con Accept/Content-Type, grant_type=authorization_code,
+ *    client_id, client_secret, code, redirect_uri, code_verifier (si PKCE).
+ * 3) Refresh token: POST oauth/token con grant_type=refresh_token; se guarda el nuevo refresh_token (uso único).
+ *
  * El refresco automático lo hace MercadoLibreTokenService cuando el motor pide el token.
- *
- * Nota: Algunos usan Postman para probar a mano la API (GET /users/me con header Authorization: Bearer TOKEN);
- * no es necesario para que la app funcione, solo sirve para depurar el token.
- *
- * Bypass de certificación: si el login/callback falla, este controlador NUNCA borra ni modifica
- * el ID de afiliado (ml_affiliate_id) en la base de datos, para que el bot siga publicando
- * con enlaces largos (&micosmtics=187001804) en modo scraping.
+ * Bypass: si login/callback falla, no se modifica ml_affiliate_id (bot sigue con enlaces largos en modo scraping).
  */
 class MercadoLibreAuthController extends Controller
 {
     private const SESSION_STATE = 'mercado_libre_oauth_state';
     private const SESSION_CODE_VERIFIER = 'mercado_libre_oauth_code_verifier';
 
-    /** URL de autorización de Mercado Libre México. */
-    private const AUTH_URL = 'https://auth.mercadolibre.com.mx/authorization';
+    /** Base URL de autorización (dominio por país: doc ML "cambiar .com.ar por el dominio del país"). */
+    private static function urlAutorizacion(): string
+    {
+        $dominio = config('services.mercado_libre.auth_domain', 'mercadolibre.com.mx');
+        return 'https://auth.' . $dominio . '/authorization';
+    }
 
     /**
      * Redirige al usuario a Mercado Libre para autorizar la aplicación.
@@ -37,12 +43,12 @@ class MercadoLibreAuthController extends Controller
     public function login(): RedirectResponse
     {
         $appId = Configuracion::getMlAppId();
-        $redirectUri = config('services.mercado_libre.redirect_uri');
+        $redirectUri = Configuracion::getMlRedirectUri();
         Log::info('MercadoLibreAuthController: Enviando Redirect URI: ' . ($redirectUri ?? '(null)'));
         if ($appId === null || $appId === '' || $redirectUri === null || $redirectUri === '') {
-            Log::warning('MercadoLibreAuthController: App ID (Ajustes/.env) o ML_REDIRECT_URI no configurados');
+            Log::warning('MercadoLibreAuthController: App ID (ML_APP_ID) o Redirect URI (ML_REDIRECT_URI) no configurados');
 
-            return redirect()->route('home')->with('error', 'Configuración de Mercado Libre incompleta.');
+            return redirect()->route('home')->with('error', 'Configuración de Mercado Libre incompleta (ML_APP_ID y ML_REDIRECT_URI en .env o Ajustes).');
         }
 
         $state = Str::random(40);
@@ -54,15 +60,15 @@ class MercadoLibreAuthController extends Controller
 
         $params = http_build_query([
             'response_type' => 'code',
-            'client_id' => $appId,
-            'redirect_uri' => $redirectUri,
+            'client_id' => $appId,       // ML_APP_ID (services.mercado_libre.app_id)
+            'redirect_uri' => $redirectUri, // ML_REDIRECT_URI (services.mercado_libre.redirect_uri)
             'scope' => 'offline_access',
             'state' => $state,
             'code_challenge' => $codeChallenge,
             'code_challenge_method' => 'S256',
         ]);
 
-        return redirect(self::AUTH_URL . '?' . $params);
+        return redirect(self::urlAutorizacion() . '?' . $params);
     }
 
     /**
@@ -73,9 +79,30 @@ class MercadoLibreAuthController extends Controller
     {
         $codigo = $request->query('code');
         if ($codigo === null || $codigo === '') {
-            Log::warning('MercadoLibreAuthController: callback sin código');
+            $errorMl = $request->query('error');
+            $errorDesc = $request->query('error_description');
+            $queryParams = $request->query();
+            $queryArray = is_array($queryParams) ? $queryParams : $queryParams->all();
+            Log::warning('MercadoLibreAuthController: callback sin código', [
+                'query' => $queryArray,
+                'error' => $errorMl,
+                'error_description' => $errorDesc,
+            ]);
             $this->limpiarSessionOAuth();
-            return redirect()->route('home')->with('error', 'Mercado Libre no devolvió código de autorización.');
+
+            $mensaje = 'Mercado Libre no devolvió código de autorización.';
+            if ($errorMl !== null || $errorDesc !== null) {
+                $mensaje .= ' ' . ($errorDesc ?: $errorMl);
+            }
+            $redirectUriActual = Configuracion::getMlRedirectUri();
+            $mensaje .= ' Comprueba: 1) ML_REDIRECT_URI en .env debe ser exactamente la misma URL que configuraste en la app de ML (ej: https://tudominio.com/mercado-libre/callback). 2) No canceles en la pantalla de ML. 3) Vuelve a intentar desde /mercado-libre/login.';
+            if ($redirectUriActual !== null && $redirectUriActual !== '') {
+                $mensaje .= ' URI configurada actualmente: ' . $redirectUriActual;
+            } else {
+                $mensaje .= ' ML_REDIRECT_URI está vacío en .env; usa por ejemplo: ' . rtrim(config('app.url', 'https://tudominio.com'), '/') . '/mercado-libre/callback';
+            }
+
+            return redirect()->route('home')->with('error', $mensaje);
         }
 
         $stateRecibido = $request->query('state');
@@ -90,7 +117,14 @@ class MercadoLibreAuthController extends Controller
 
         $tokens = MercadoLibreTokenService::intercambiarCodigoPorTokens($codigo, $codeVerifier);
         if ($tokens === null) {
-            return redirect()->route('home')->with('error', 'No se pudieron obtener los tokens de Mercado Libre. Comprueba que ML_REDIRECT_URI coincida exactamente con la URL configurada en tu app y que el usuario sea cuenta principal (no colaborador).');
+            return redirect()->route('home')->with('error', 'No se pudieron obtener los tokens. Revisa ML_APP_ID, ML_SECRET_KEY y ML_REDIRECT_URI en .env o Ajustes.');
+        }
+        if (isset($tokens['error'])) {
+            $mensaje = $tokens['error_description'] ?? $tokens['error'];
+            if (($tokens['error'] ?? '') === 'invalid_grant') {
+                $mensaje .= ' Comprueba que ML_REDIRECT_URI coincida exactamente con la URL de tu app y que el usuario sea cuenta principal (no colaborador).';
+            }
+            return redirect()->route('home')->with('error', 'Mercado Libre: ' . $mensaje);
         }
 
         $refreshToken = $tokens['refresh_token'] ?? '';
@@ -102,9 +136,9 @@ class MercadoLibreAuthController extends Controller
 
         Log::info('MercadoLibreAuthController: tokens de Mercado Libre guardados correctamente.');
 
-        $mensaje = 'Mercado Libre conectado. El rastreo de ofertas usará la API oficial.';
+        $mensaje = 'Mercado Libre conectado.';
         if ($refreshToken === '') {
-            $mensaje .= ' Revisa en el panel de desarrolladores de ML que la app tenga el scope offline_access y vuelve a hacer login para obtener el refresh token.';
+            $mensaje .= ' Revisa en el panel de ML que la app tenga scope offline_access y vuelve a hacer login para el refresh token.';
         }
 
         return redirect()->route('home')->with('success', $mensaje);

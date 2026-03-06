@@ -57,6 +57,15 @@ class WalmartMotor extends BaseMotorRastreador
                 }, HttpRastreador::CACHE_PROXY_TTL);
 
                 if ($resultado['status'] < 200 || $resultado['status'] >= 300) {
+                    $this->registrarFalloSiBloqueo($resultado['status'], $resultado['body']);
+                    if (str_contains($resultado['body'], 'Verifica tu identidad')) {
+                        HttpRastreador::invalidarCacheProxy($url);
+                    }
+                    continue;
+                }
+                if (str_contains($resultado['body'], 'Verifica tu identidad')) {
+                    $this->registrarFalloSiBloqueo(403, $resultado['body']);
+                    HttpRastreador::invalidarCacheProxy($url);
                     continue;
                 }
 
@@ -151,7 +160,7 @@ class WalmartMotor extends BaseMotorRastreador
             if ($precioOriginal <= 0) {
                 $precioOriginal = $precioOferta;
             }
-            $imagenUrl = $this->extraerSrc($xpath, $nodo, './/img[contains(@src, "http")]');
+            $imagenUrl = $this->extraerImagenUrlConLazy($xpath, $nodo);
 
             if ($nombre === '' && $enlace === '') {
                 continue;
@@ -205,6 +214,55 @@ class WalmartMotor extends BaseMotorRastreador
         $el = $nodes->item(0);
 
         return $el instanceof \DOMElement ? trim($el->getAttribute('src') ?? '') : '';
+    }
+
+    /**
+     * Extrae URL de imagen probando src, data-src, data-srcset, srcset (Walmart usa lazy load).
+     */
+    private function extraerImagenUrlConLazy(DOMXPath $xpath, \DOMNode $nodo): string
+    {
+        $nodes = $xpath->query('.//img', $nodo);
+        if ($nodes === false || $nodes->length === 0) {
+            return '';
+        }
+        $el = $nodes->item(0);
+        if (! $el instanceof \DOMElement) {
+            return '';
+        }
+        $attrs = ['src', 'data-src', 'data-srcset', 'srcset'];
+        foreach ($attrs as $attr) {
+            $v = trim((string) $el->getAttribute($attr));
+            if ($v !== '') {
+                if (($attr === 'data-srcset' || $attr === 'srcset') && str_contains($v, ',')) {
+                    $v = trim(explode(',', $v)[0]);
+                    if (preg_match('/^(\S+)/', $v, $m)) {
+                        $v = $m[1];
+                    }
+                }
+                if ($v !== '') {
+                    return $this->normalizarUrlImagenWalmart($v);
+                }
+            }
+        }
+        return '';
+    }
+
+    private function normalizarUrlImagenWalmart(string $url): string
+    {
+        $url = trim($url);
+        if ($url === '') {
+            return '';
+        }
+        if (str_starts_with($url, 'http://') || str_starts_with($url, 'https://')) {
+            return $url;
+        }
+        if (str_starts_with($url, '//')) {
+            return 'https:' . $url;
+        }
+        if (str_starts_with($url, '/')) {
+            return 'https://www.walmart.com.mx' . $url;
+        }
+        return 'https://www.walmart.com.mx/' . ltrim($url, '/');
     }
 
     private function extraerPrecioDesdeNodo(DOMXPath $xpath, \DOMNode $nodo, string $dataAttr, string $classPart): float

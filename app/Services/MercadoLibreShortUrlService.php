@@ -80,18 +80,18 @@ final class MercadoLibreShortUrlService
     }
 
     /**
-     * Extrae el Item ID de Mercado Libre (ej. MLM123456) solo por regex sobre la URL (y fallback sku_tienda).
-     * No requiere API ni conexión: funciona 100% local para mostrar "Pega este ID en el buscador: MLM..." en modo scraping.
-     * Formato típico en URL: /MLM-123456789-titulo o /MLM123456789; sku_tienda para ML: "ML-MLM123456".
+     * Extrae el Item ID de Mercado Libre (ej. MLM45288040) solo por regex sobre la URL (y fallback sku_tienda).
+     * No requiere API ni conexión. Soporta ítems (/MLM123) y catálogo (/p/MLM45288040).
+     * Formato típico: /MLM-123456789-titulo, /MLM123456789, /p/MLM45288040 (catálogo).
      *
-     * @return string|null Código del producto (ej. MLM123456) o null si no se puede extraer
+     * @return string|null Código del producto (ej. MLM45288040) o null si no se puede extraer
      */
     public static function extraerItemId(?string $url, ?string $skuTienda): ?string
     {
         if ($url !== null && $url !== '') {
             $path = parse_url($url, PHP_URL_PATH);
             if (is_string($path) && $path !== '') {
-                // Formato: /MLM-123456789-titulo o /MLM123456789 o /p/MLM123456789
+                // Ítems: /MLM123; catálogo: /p/MLM45288040; con slug: /MLM-123-titulo
                 if (preg_match('#/(?:p/)?(ML[A-Z]-\d+[a-zA-Z0-9_-]*|ML[A-Z]\d+)#', $path, $m)) {
                     $candidato = trim($m[1], '-');
                     if ($candidato !== '') {

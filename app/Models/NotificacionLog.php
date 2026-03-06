@@ -16,6 +16,7 @@ class NotificacionLog extends Model
         'estado',
         'mensaje_error',
         'enlace_generado',
+        'origen_rastreo',
     ];
 
     public const ESTADO_ENVIADO = 'enviado';
@@ -29,6 +30,8 @@ class NotificacionLog extends Model
 
     /**
      * Registra un intento de notificación (desde NotificadorTelegram o EnviarOfertaTelegramJob).
+     *
+     * @param  string|null  $origenRastreo  'API' o 'Scraping' según origen del rastreo (Mercado Libre).
      */
     public static function registrar(
         ?int $productoId,
@@ -36,7 +39,8 @@ class NotificacionLog extends Model
         ?string $chatId,
         string $estado,
         ?string $mensajeError = null,
-        ?string $enlaceGenerado = null
+        ?string $enlaceGenerado = null,
+        ?string $origenRastreo = null
     ): self {
         return self::query()->create([
             'producto_id' => $productoId,
@@ -45,6 +49,7 @@ class NotificacionLog extends Model
             'estado' => $estado,
             'mensaje_error' => $mensajeError,
             'enlace_generado' => $enlaceGenerado,
+            'origen_rastreo' => $origenRastreo,
         ]);
     }
 }
