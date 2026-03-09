@@ -51,7 +51,12 @@ SELECTOR_IMAGEN = "img.poly-component__picture, img[data-src], img[src*='http'],
 SELECTOR_NOMBRE = "a.poly-component__title, .poly-component__title, h2, [class*='title'], [class*='ItemTitle']"
 # Precio actual: bloque con fraction + cents (poly-price__current)
 SELECTOR_PRECIO = "div.poly-price__current .andes-money-amount__fraction, div.poly-price__current .andes-money-amount, span.andes-money-amount__fraction, .andes-money-amount"
-SELECTOR_PRECIO_ORIGINAL = "s.andes-money-amount--previous, s.andes-money-amount, .andes-money-amount--previous"
+# Precio original: <s> tachado (listado y PDP). Incluye oferta relámpago: ui-pdp-price__original-value, andes-money-amount--previous, y aria-label "Antes: X pesos"
+SELECTOR_PRECIO_ORIGINAL = (
+    "s.ui-pdp-price__original-value.andes-money-amount--previous, "
+    "s.andes-money-amount--previous, s.andes-money-amount, .andes-money-amount--previous, "
+    "s.ui-pdp-price__original-value, [aria-label*='Antes:']"
+)
 SELECTOR_DESCUENTO_PILL = "span.andes-money-amount__discount, .poly-price__disc--pill"
 
 URL_BUSQUEDA = os.environ.get("ML_SEARCH_URL", "https://listado.mercadolibre.com.mx/ofertas")
@@ -178,6 +183,22 @@ def _query_one(card, selectors: str):
     return None
 
 
+def _precio_desde_aria_label(el) -> float | None:
+    """Extrae precio desde aria-label tipo 'Antes: 634 pesos con 30 centavos'."""
+    if not el:
+        return None
+    label = (el.get_attribute("aria-label") or "").strip()
+    if not label or "Antes:" not in label:
+        return None
+    # "Antes: 634 pesos con 30 centavos" -> 634.30
+    m = re.search(r"Antes:\s*(\d+)\s*pesos(?:\s*con\s*(\d+)\s*centavos)?", label, re.I)
+    if not m:
+        return None
+    enteros = int(m.group(1))
+    centavos = int(m.group(2)) if m.group(2) else 0
+    return round(enteros + centavos / 100.0, 2)
+
+
 def _precio_actual_desde_card(card) -> float:
     """Precio actual desde div.poly-price__current (fraction + cents)."""
     bloque = card.query_selector("div.poly-price__current")
@@ -239,13 +260,21 @@ def extraer_productos(page, card_selector: str | None = None) -> list[dict]:
                 precio_actual = parse_precio(price_el.inner_text()) if price_el else 0.0
 
             old_el = _query_one(card, SELECTOR_PRECIO_ORIGINAL)
-            precio_original = parse_precio(old_el.inner_text()) if old_el else None
+            precio_original = None
+            if old_el:
+                # Preferir aria-label (fiable en oferta relámpago): "Antes: 634 pesos con 30 centavos"
+                precio_original = _precio_desde_aria_label(old_el)
+                if precio_original is None:
+                    precio_original = parse_precio(old_el.inner_text())
 
             descuento = _descuento_desde_pill(card)
             if descuento is None and precio_original and precio_original > 0 and precio_actual < precio_original:
                 descuento = int(round((1 - precio_actual / precio_original) * 100))
             if descuento is None:
                 descuento = 0
+            # Oferta relámpago: a veces la tarjeta no tiene <s> con precio anterior pero sí el % OFF
+            if precio_original is None and descuento and descuento > 0 and precio_actual and precio_actual > 0:
+                precio_original = round(precio_actual / (1 - descuento / 100.0), 2)
 
             productos.append({
                 "nombre": nombre or "Sin nombre",
