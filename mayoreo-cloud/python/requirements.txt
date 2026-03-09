@@ -1,0 +1,5 @@
+# Fase 1 - Motor Python - Scraper Mercado Libre
+playwright>=1.40.0
+playwright-stealth>=2.0.0
+mysql-connector-python>=8.2.0
+python-dotenv>=1.0.0
