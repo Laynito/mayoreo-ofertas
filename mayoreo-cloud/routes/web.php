@@ -1,10 +1,24 @@
 <?php
 
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\PreciosBajosController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
     return view('welcome');
 });
+
+// Login de miembros (candado) — front distinto al admin
+Route::middleware('guest')->group(function () {
+    Route::get('login', [LoginController::class, 'showLoginForm'])->name('login');
+    Route::post('login', [LoginController::class, 'login']);
+});
+Route::post('logout', [LoginController::class, 'logout'])->name('logout')->middleware('auth');
+
+// Zona de precios bajos (solo miembros autenticados)
+Route::get('precios-bajos', PreciosBajosController::class)
+    ->middleware('auth')
+    ->name('precios-bajos');
 
 // Callback de OAuth Mercado Libre: ML redirige aquí con ?code=... tras autorizar
 Route::get('/mercado-libre/callback', function () {

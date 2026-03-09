@@ -33,6 +33,18 @@ class HerramientasPage extends Page
                 ->modalHeading('Ejecutar ciclo completo')
                 ->modalDescription('Se lanzará el scraper contra la web de ofertas y luego la sincronización de afiliados y Telegram. El proceso corre en segundo plano.')
                 ->action(function (): void {
+                    if (Storage::exists('scraper_status.json')) {
+                        $json = Storage::get('scraper_status.json');
+                        $decoded = json_decode($json, true);
+                        if (is_array($decoded) && ($decoded['status'] ?? '') === 'running') {
+                            Notification::make()
+                                ->title('Ya hay una ejecución en curso')
+                                ->body('El scraper está corriendo. Espera a que termine (recarga la página para ver "Completado") o revisa storage/logs/laravel.log. No se lanzó otro proceso.')
+                                ->warning()
+                                ->send();
+                            return;
+                        }
+                    }
                     $command = [
                         'php',
                         base_path('artisan'),

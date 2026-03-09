@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Http\Integrations\MercadoLibre\MercadoLibreConnector;
 use App\Http\Integrations\MercadoLibre\Requests\GetAffiliateLinkRequest;
+use App\Models\Marketplace;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 class AffiliateService
@@ -57,10 +59,38 @@ class AffiliateService
         return $this->getCanonicalAffiliateLink($urlProducto);
     }
 
+    /** TTL de caché para la configuración del marketplace (segundos). */
+    private const AFFILIATE_CONFIG_CACHE_TTL = 3600; // 60 minutos
+
+    /**
+     * Devuelve la configuración de afiliado: prioridad Marketplace (slug mercado_libre) activo, sino config.
+     * Cacheada 60 minutos para no saturar MySQL en picos de tráfico.
+     *
+     * @return array{app_id: string, affid: string, matt_word: string}
+     */
+    public function getAffiliateConfig(): array
+    {
+        return Cache::remember(Marketplace::AFFILIATE_CONFIG_CACHE_KEY, self::AFFILIATE_CONFIG_CACHE_TTL, function (): array {
+            $marketplace = Marketplace::mercadoLibreActivo();
+            if ($marketplace) {
+                return [
+                    'app_id' => $marketplace->app_id ?? config('services.mercadolibre.app_id'),
+                    'affid' => $marketplace->affiliate_id ?? config('services.mercadolibre.affid'),
+                    'matt_word' => $marketplace->getMattWord(),
+                ];
+            }
+            return [
+                'app_id' => config('services.mercadolibre.app_id'),
+                'affid' => config('services.mercadolibre.affid'),
+                'matt_word' => config('services.mercadolibre.matt_word', 'mayoreo_cloud'),
+            ];
+        });
+    }
+
     /**
      * Fuerza siempre la concatenación de los tres parámetros de afiliado al final de la URL.
-     * Link final: url?matt_tool=ML_APP_ID&matt_word=mayoreo_cloud&affid=ML_AFFID
-     * Si la URL ya tiene ? se usa &.
+     * Usa Marketplace (mercado_libre) si existe y está activo; si no, config.
+     * Link final: url?matt_tool=...&matt_word=...&affid=...
      */
     public function appendAffiliateParams(string $url): string
     {
@@ -69,10 +99,8 @@ class AffiliateService
             return $url;
         }
         $url = $this->stripAffiliateParamsFromUrl($url);
-        $toolId = config('services.mercadolibre.app_id');   // matt_tool (App ID)
-        $mattWord = config('services.mercadolibre.matt_word', 'mayoreo_cloud');
-        $affid = config('services.mercadolibre.affid');    // affid (ID afiliado)
-        $params = 'matt_tool=' . $toolId . '&matt_word=' . $mattWord . '&affid=' . $affid;
+        $config = $this->getAffiliateConfig();
+        $params = 'matt_tool=' . ($config['app_id'] ?? '') . '&matt_word=' . ($config['matt_word'] ?? 'mayoreo_cloud') . '&affid=' . ($config['affid'] ?? '');
         $separator = str_contains($url, '?') ? '&' : '?';
         return $url . $separator . $params;
     }

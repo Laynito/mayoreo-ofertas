@@ -5,6 +5,7 @@ Usa mysql-connector-python. Lee .env de Laravel (incl. contraseña con #).
 Selectores para listado ML México en vivo (ofertas generales + relámpago).
 """
 
+import json
 import os
 import random
 import re
@@ -292,8 +293,8 @@ def extraer_productos(page, card_selector: str | None = None) -> list[dict]:
     return productos
 
 
-def guardar_en_mysql(productos: list[dict]) -> None:
-    """Inserta o actualiza productos en MySQL con mysql-connector-python (ON DUPLICATE KEY UPDATE por SKU)."""
+def _get_db_connection():
+    """Conexión MySQL con variables de .env."""
     host = os.environ.get("DB_HOST", "127.0.0.1")
     port = int(os.environ.get("DB_PORT", "3306"))
     database = os.environ.get("DB_DATABASE", "mayoreo_cloud")
@@ -301,14 +302,45 @@ def guardar_en_mysql(productos: list[dict]) -> None:
     password = os.environ.get("DB_PASSWORD", "")
     if password and (password.startswith("'") or password.startswith('"')):
         password = password.strip("'\"").strip()
-
-    conn = mysql.connector.connect(
+    return mysql.connector.connect(
         host=host,
         port=port,
         user=user,
         password=password,
         database=database,
     )
+
+
+def _get_mercado_libre_from_db() -> dict | None:
+    """
+    Consulta la tabla marketplaces por slug='mercado_libre'.
+    Devuelve {'es_activo': bool, 'url_busqueda': str|None, 'configuracion': dict|None} o None si no hay fila/error.
+    configuracion puede contener 'urls' (lista de URLs de secciones: Relámpago, Liquidación, etc.).
+    """
+    try:
+        conn = _get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT es_activo, url_busqueda, configuracion FROM marketplaces WHERE slug = %s LIMIT 1",
+            ("mercado_libre",),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row and row.get("configuracion") is not None and isinstance(row["configuracion"], str):
+            try:
+                row["configuracion"] = json.loads(row["configuracion"])
+            except (TypeError, ValueError):
+                row["configuracion"] = {}
+        return row
+    except Exception as e:
+        print(f"[WARN] No se pudo leer marketplaces (¿tabla existe?): {e}", file=sys.stderr)
+        return None
+
+
+def guardar_en_mysql(productos: list[dict]) -> None:
+    """Inserta o actualiza productos en MySQL con mysql-connector-python (ON DUPLICATE KEY UPDATE por SKU)."""
+    conn = _get_db_connection()
     cursor = conn.cursor()
 
     sql = """
@@ -447,13 +479,35 @@ def _scrape_una_url(page, url: str, card_selector: str, timeout_selector: int, s
 
 
 def main():
+    # Cerebro central: si existe marketplace mercado_libre en BD, respetar es_activo y URLs (configuracion.urls o url_busqueda)
+    ml_row = _get_mercado_libre_from_db()
+    urls_to_scrape = []
+    if ml_row is not None:
+        if not ml_row.get("es_activo", True):
+            print("[*] Marketplace Mercado Libre está desactivado en el panel. No se ejecuta el scraper.")
+            sys.exit(0)
+        config = ml_row.get("configuracion") or {}
+        urls_config = config.get("urls")
+        if urls_config and isinstance(urls_config, list):
+            urls_to_scrape = [u.strip() for u in urls_config if u and str(u).strip().startswith("https://")]
+            if urls_to_scrape:
+                print(f"[*] Usando {len(urls_to_scrape)} URLs de secciones desde panel (configuracion.urls).")
+        if not urls_to_scrape:
+            url_busqueda = (ml_row.get("url_busqueda") or "").strip()
+            if url_busqueda:
+                urls_to_scrape = [url_busqueda]
+                print(f"[*] Usando URL de ofertas desde panel: {url_busqueda[:60]}...")
+            else:
+                urls_to_scrape = OFFER_URLS
+    if not urls_to_scrape:
+        urls_to_scrape = OFFER_URLS
+
     if not os.environ.get("DB_HOST"):
         print("[INFO] DB_HOST no definido en .env. Configura DB_* y usa MySQL.", file=sys.stderr)
     screenshot_path = PROJECT_ROOT / "error.png"
     TIMEOUT_SELECTOR = 60000
     card_selector = CARD_SELECTOR
 
-    urls_to_scrape = OFFER_URLS
     print(f"[*] Scrapeando {len(urls_to_scrape)} secciones en vivo (deduplicado por SKU).")
 
     productos_por_sku: dict[str, dict] = {}
