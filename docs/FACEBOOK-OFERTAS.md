@@ -67,6 +67,25 @@ Meta ha dejado de usar el permiso **manage_pages**; si lo pides, verás "Invalid
 
 En el Explorador de la API Graph, al generar el token pide solo esos tres. No marques `manage_pages` ni `publish_pages`.
 
+### Token que no caduca (hacer una sola vez)
+
+El token que sacas del Explorador caduca en poco tiempo. Para obtener un **token de página que no caduca** (o dura 60+ días):
+
+1. En [developers.facebook.com](https://developers.facebook.com) → Tu app → **Configuración → Básica**: copia **ID de la aplicación** y **Clave secreta de la aplicación**.
+2. En `.env` añade (sin comillas en los valores):
+   ```env
+   FB_APP_ID=tu_id_de_app
+   FB_APP_SECRET=tu_clave_secreta
+   ```
+3. En el [Explorador de la API Graph](https://developers.facebook.com/tools/explorer/) genera un token de **usuario** con permisos `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`.
+4. Ejecuta el script que canjea ese token corto por el token de página permanente:
+   ```bash
+   cd /home/mayoreo/htdocs/mayoreo-cloud
+   python/venv/bin/python python/facebook_get_long_lived_token.py
+   ```
+   Te pedirá que pegues el token del paso 3 (o puedes ponerlo en .env como `FB_TOKEN_CORTO=...`).
+5. El script imprime el **token de la PÁGINA**. Cópialo y pégalo en `.env` como `FB_PAGE_ACCESS_TOKEN="..."`. Ese token no caduca y no tendrás que renovarlo.
+
 ### Error 403: "This app is not allowed to publish to other users' timelines"
 
 Ese error significa que estás usando un **token de usuario** en lugar del **token de la página**. Para publicar en la Fan Page hace falta el **Page Access Token**:
@@ -74,7 +93,8 @@ Ese error significa que estás usando un **token de usuario** en lugar del **tok
 1. Entra a [Explorador de la API Graph](https://developers.facebook.com/tools/explorer/), elige tu app y genera un token con permisos: `pages_show_list`, `pages_read_engagement`, `pages_manage_posts` (sin `manage_pages`).
 2. En el explorador, haz una petición **GET** a: `me/accounts` (o abre en el navegador la URL que te da el explorador para esa petición).
 3. En la respuesta JSON verás una lista `data` con tus páginas. Cada elemento tiene `id` y `access_token`. El **access_token** de esa página es el que debes usar (Panel → Marketplace → Facebook, o .env como `FB_PAGE_ACCESS_TOKEN`). El **id** es el Page ID (`FB_PAGE_ID`).
-4. Sustituye en el panel o en .env el token actual por ese `access_token` de la página y vuelve a ejecutar el script.
+4. Sustituye en el panel o en .env el token actual por ese `access_token` de la página y vuelve a ejecutar el script.  
+   **Mejor aún:** usa el script `facebook_get_long_lived_token.py` (ver arriba) para obtener un token que no caduca.
 
 ---
 

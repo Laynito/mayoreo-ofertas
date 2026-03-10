@@ -228,14 +228,12 @@ def main() -> int:
     # Credenciales: .env tiene prioridad; si falta algo, se usa el panel (Marketplace → Facebook)
     page_id = (os.environ.get("FB_PAGE_ID") or "").strip()
     token = (os.environ.get("FB_PAGE_ACCESS_TOKEN") or "").strip()
-    token_from = "env"
     if not page_id or not token:
         page_id_bd, token_bd = _credenciales_facebook_desde_bd()
         if not page_id:
             page_id = (page_id_bd or "").strip()
         if not token:
             token = (token_bd or "").strip()
-            token_from = "panel (BD)"
 
     if not token:
         print(
@@ -253,10 +251,6 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-
-    # Debug: de dónde sale el token (últimos 6 caracteres para verificar sin exponer)
-    token_tail = (token[-6:] if len(token) >= 6 else token)
-    print(f"[DEBUG] Token leído desde: {token_from}. Termina en: ...{token_tail}")
 
     # Verificar que el token sea de PÁGINA (no de usuario); si es de usuario dará 403 al publicar
     try:
