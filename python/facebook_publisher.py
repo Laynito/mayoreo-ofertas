@@ -150,17 +150,53 @@ def _imagen_publica(url_imagen: str | None) -> str | None:
     return f"{APP_URL}/{url.lstrip('/')}"
 
 
-def _texto_post(nombre: str, precio_actual, precio_original, link: str) -> str:
-    """Texto llamativo para el post."""
+def _nombre_plataforma(tienda: str | None) -> str:
+    """Nombre legible de la plataforma/tienda."""
+    if not tienda or not str(tienda).strip():
+        return "Oferta"
+    t = str(tienda).strip().lower()
+    if "mercado" in t or "ml" == t or "mercadolibre" in t:
+        return "Mercado Libre"
+    if "coppel" in t:
+        return "Coppel"
+    if "walmart" in t:
+        return "Walmart"
+    return tienda.strip().title()
+
+
+def _texto_post(
+    nombre: str,
+    precio_actual,
+    precio_original,
+    link: str,
+    descuento: int | float | None = None,
+    tienda: str | None = None,
+) -> str:
+    """Texto llamativo para el post (incluye % descuento y plataforma)."""
     titulo = (nombre or "")[:120]
     precio = f"{float(precio_actual):.2f}" if precio_actual is not None else "—"
     antes = f"{float(precio_original):.2f}" if precio_original is not None else "—"
-    return (
-        f"🔥 ¡OFERTA BOMBA! 🔥\n\n"
-        f"📦 {titulo}\n\n"
-        f"💰 Solo ${precio} · Antes ${antes}\n\n"
-        f"👉 Compra aquí: {link}"
-    )
+    plataforma = _nombre_plataforma(tienda)
+    lineas = [
+        "🔥 ¡OFERTA BOMBA! 🔥",
+        "",
+        f"📦 {titulo}",
+        "",
+        f"🛒 {plataforma}",
+    ]
+    if descuento is not None:
+        try:
+            pct = int(round(float(descuento)))
+            lineas.append(f"📉 {pct}% OFF")
+            lineas.append("")
+        except (TypeError, ValueError):
+            lineas.append("")
+    lineas.extend([
+        f"💰 A Solo ${precio} · Antes ${antes}",
+        "",
+        f"👉 Compra aquí: {link}",
+    ])
+    return "\n".join(lineas)
 
 
 def _publicar_foto(page_id: str, access_token: str, image_url: str, message: str) -> bool:
@@ -189,12 +225,17 @@ def main() -> int:
         print("Configura DB_HOST (y DB_*) en .env para leer productos y credenciales.", file=sys.stderr)
         return 1
 
-    # Credenciales: primero desde el panel (Marketplace → Facebook), luego .env
-    page_id, token = _credenciales_facebook_desde_bd()
-    if not page_id:
-        page_id = os.environ.get("FB_PAGE_ID", "").strip()
-    if not token:
-        token = os.environ.get("FB_PAGE_ACCESS_TOKEN", "").strip()
+    # Credenciales: .env tiene prioridad; si falta algo, se usa el panel (Marketplace → Facebook)
+    page_id = (os.environ.get("FB_PAGE_ID") or "").strip()
+    token = (os.environ.get("FB_PAGE_ACCESS_TOKEN") or "").strip()
+    token_from = "env"
+    if not page_id or not token:
+        page_id_bd, token_bd = _credenciales_facebook_desde_bd()
+        if not page_id:
+            page_id = (page_id_bd or "").strip()
+        if not token:
+            token = (token_bd or "").strip()
+            token_from = "panel (BD)"
 
     if not token:
         print(
@@ -213,6 +254,10 @@ def main() -> int:
         )
         return 1
 
+    # Debug: de dónde sale el token (últimos 6 caracteres para verificar sin exponer)
+    token_tail = (token[-6:] if len(token) >= 6 else token)
+    print(f"[DEBUG] Token leído desde: {token_from}. Termina en: ...{token_tail}")
+
     # Verificar que el token sea de PÁGINA (no de usuario); si es de usuario dará 403 al publicar
     try:
         r = requests.get(
@@ -226,12 +271,41 @@ def main() -> int:
             token_name = data.get("name", "")
             if token_id != page_id:
                 print(
-                    f"[AVISO] El token parece ser de usuario o de otra página: '{token_name}' (id={token_id}).\n"
-                    "Para publicar necesitas el TOKEN DE LA PÁGINA, no tu token de usuario.\n"
-                    "Pasos: 1) Explorador de la API Graph 2) Genera token (usuario) con pages_* 3) GET me/accounts "
-                    "4) Copia el 'access_token' que está DENTRO de la página 'Cazador De Precios' en la respuesta.",
+                    f"[AVISO] El token es de usuario '{token_name}' (id={token_id}), no de la página (id={page_id}).",
                     file=sys.stderr,
                 )
+                # Intentar obtener el token de la página desde me/accounts con este token de usuario
+                try:
+                    r2 = requests.get(
+                        f"https://graph.facebook.com/{GRAPH_API_VERSION}/me/accounts",
+                        params={"access_token": token, "fields": "id,name,access_token"},
+                        timeout=10,
+                    )
+                    if r2.ok:
+                        data2 = r2.json()
+                        for item in (data2.get("data") or []):
+                            if str(item.get("id")) == page_id:
+                                page_token = (item.get("access_token") or "").strip()
+                                if page_token:
+                                    print(
+                                        "\n[SOLUCIÓN] Token de la PÁGINA (cópialo en .env como FB_PAGE_ACCESS_TOKEN):\n"
+                                        f"{page_token}\n",
+                                        file=sys.stderr,
+                                    )
+                                break
+                        else:
+                            print(
+                                "No se encontró la página con id {} en me/accounts. "
+                                "Haz GET me/accounts en el Explorador y copia el 'access_token' de tu página."
+                                .format(page_id),
+                                file=sys.stderr,
+                            )
+                except requests.RequestException:
+                    print(
+                        "Pasos: Explorador API Graph → Genera token (usuario) con pages_* → GET me/accounts "
+                        "→ Copia el 'access_token' DENTRO del objeto de la página 'Cazador De Precios'.",
+                        file=sys.stderr,
+                    )
                 return 1
             print(f"Token OK (página: {token_name})")
     except requests.RequestException:
@@ -254,7 +328,9 @@ def main() -> int:
         nombre = p.get("nombre") or ""
         precio_actual = p.get("precio_actual")
         precio_original = p.get("precio_original")
-        msg = _texto_post(nombre, precio_actual, precio_original, link)
+        descuento = p.get("descuento")
+        tienda = p.get("tienda")
+        msg = _texto_post(nombre, precio_actual, precio_original, link, descuento=descuento, tienda=tienda)
 
         print(f"[{i+1}/{len(productos)}] {nombre[:50]}...")
         if _publicar_foto(page_id, token, imagen, msg):
