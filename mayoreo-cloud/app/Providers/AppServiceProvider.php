@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Console\Commands\FullBackupCommand;
 use App\Console\Commands\MercadoLibreExchangeCodeCommand;
 use App\Console\Commands\SyncProductosAffiliateCommand;
 use Filament\Http\Responses\Auth\Contracts\LoginResponse as LoginResponseContract;
@@ -23,6 +24,7 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->commands([
+            FullBackupCommand::class,
             SyncProductosAffiliateCommand::class,
             MercadoLibreExchangeCodeCommand::class,
         ]);

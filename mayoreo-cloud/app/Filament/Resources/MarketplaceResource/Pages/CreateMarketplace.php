@@ -16,9 +16,17 @@ class CreateMarketplace extends CreateRecord
 
     public function mutateFormDataBeforeCreate(array $data): array
     {
-        $urls = array_values(array_filter(array_column($data['urls_secciones'] ?? [], 'url')));
-        $data['configuracion'] = $data['configuracion'] ?? [];
-        $data['configuracion']['urls'] = $urls;
+        $text = is_string($data['urls_secciones'] ?? null) ? trim($data['urls_secciones']) : '';
+        $lines = $text === '' ? [] : preg_split('/\r\n|\r|\n/', $text);
+        $urls = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line !== '' && str_starts_with($line, 'https://')) {
+                $urls[] = $line;
+            }
+        }
+        $data['configuracion'] = is_array($data['configuracion'] ?? null) ? $data['configuracion'] : [];
+        $data['configuracion']['urls'] = array_values(array_filter($urls));
         unset($data['urls_secciones']);
         return $data;
     }

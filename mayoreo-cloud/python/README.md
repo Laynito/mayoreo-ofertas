@@ -1,15 +1,27 @@
 # Fase 1: Motor Python - Scraper Mercado Libre
 
+## En el VPS (Debian/Ubuntu): si no existe `pip` ni `python`
+
+Instala pip y opcionalmente el alias `python`:
+
+```bash
+sudo apt update
+sudo apt install -y python3-pip python3-venv
+# Opcional: sudo apt install -y python-is-python3
+```
+
+Luego usa **siempre** `python3` y `pip3` (o un venv con `pip`).
+
 ## Entorno virtual y dependencias
 
 Desde la raíz del proyecto (o desde `python/`):
 
 ```bash
-cd /home/mayoreo/htdocs/mayoreo-cloud/python
-python3 -m venv venv
-source venv/bin/activate   # Linux/macOS
-# En Windows: venv\Scripts\activate
-pip install -r requirements.txt
+cd /home/mayoreo/htdocs/mayoreo-cloud
+python3 -m venv python/venv
+source python/venv/bin/activate   # Linux/macOS
+# En Windows: python\venv\Scripts\activate
+pip install -r python/requirements.txt
 ```
 
 ## Credenciales MySQL (Laravel .env)
@@ -18,7 +30,7 @@ El script lee **DB_HOST, DB_DATABASE, DB_USERNAME, DB_PASSWORD** del `.env` de L
 
 ## Instalar Playwright y ejecutar el scraper
 
-En el servidor usar **python3** (no `python`). Si no existe el venv, créalo primero:
+Si no existe el venv, créalo primero:
 
 ```bash
 cd /home/mayoreo/htdocs/mayoreo-cloud/python
@@ -38,10 +50,41 @@ python3 scraper_ml.py
 
 (Scrape en vivo: 2 secciones — ofertas generales + relámpago.)
 
+Scraper Walmart (misma lógica de SKU, tienda Walmart):
+
+```bash
+python3 scraper_walmart.py
+```
+
+**Walmart vía Sitemap (sin navegador, sin login)** — recomendado en VPS:
+
+```bash
+cd /home/mayoreo/htdocs/mayoreo-cloud
+source python/venv/bin/activate
+pip install -r python/requirements.txt
+python3 python/walmart_sitemap_scraper.py
+```
+
+O sin venv, si ya tienes `pip3` instalado:
+
+```bash
+cd /home/mayoreo/htdocs/mayoreo-cloud
+pip3 install -r python/requirements.txt
+python3 python/walmart_sitemap_scraper.py
+```
+
+**En un VPS** (sin pantalla): Walmart suele mostrar "Verifica tu identidad" (captcha). Para usar navegador virtual y dar tiempo a que cargue:
+
+```bash
+cd /home/mayoreo/htdocs/mayoreo-cloud
+apt install -y xvfb   # una vez
+HEADLESS=0 xvfb-run ./python/venv/bin/python -u python/scraper_walmart.py
+```
+
 Otra URL o ver el navegador:
 
 ```bash
-HEADLESS=0 ML_SEARCH_URL="https://listado.mercadolibre.com.mx/tu-busqueda" python scraper_ml.py
+HEADLESS=0 ML_SEARCH_URL="https://listado.mercadolibre.com.mx/tu-busqueda" python3 scraper_ml.py
 ```
 
 ## Después del scraper: afiliado y Telegram (Laravel)

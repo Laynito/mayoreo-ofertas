@@ -78,22 +78,57 @@ class MarketplaceResource extends Resource
                     ])
                     ->columns(2),
 
+                Forms\Components\Section::make('Configuración de Sesión')
+                    ->description('Credenciales y cookies. El script rellena cookies_json al guardar la sesión.')
+                    ->schema([
+                        Forms\Components\TextInput::make('email')
+                            ->label('Email')
+                            ->email()
+                            ->placeholder('Ej: mi@email.com')
+                            ->nullable(),
+                        Forms\Components\TextInput::make('password')
+                            ->label('Contraseña')
+                            ->password()
+                            ->revealable()
+                            ->placeholder('••••••••')
+                            ->nullable(),
+                        Forms\Components\Textarea::make('cookies_json')
+                            ->label('Cookies (JSON)')
+                            ->placeholder('Lo rellena el script automáticamente.')
+                            ->disabled()
+                            ->dehydrated(true)
+                            ->helperText('Solo lectura: lo actualiza el script al guardar la sesión.')
+                            ->columnSpanFull(),
+                        Forms\Components\TextInput::make('affiliate_user')
+                            ->label('Email / Usuario (legacy)')
+                            ->placeholder('Ej: mi@email.com')
+                            ->nullable()
+                            ->visible(fn ($record) => $record?->affiliate_user !== null),
+                        Forms\Components\TextInput::make('affiliate_password')
+                            ->label('Contraseña (legacy)')
+                            ->password()
+                            ->revealable()
+                            ->nullable()
+                            ->visible(fn ($record) => $record?->affiliate_password !== null),
+                        Forms\Components\Textarea::make('session_data')
+                            ->label('Session Data (legacy)')
+                            ->disabled()
+                            ->dehydrated(true)
+                            ->visible(fn ($record) => $record?->session_data !== null)
+                            ->columnSpanFull(),
+                    ])
+                    ->columns(1)
+                    ->collapsible(),
+
                 Forms\Components\Section::make('URLs de secciones (ofertas)')
                     ->description('Varias URLs para scrapear, ej. Relámpago, Liquidación, etc. Si hay al menos una, el scraper usará estas en lugar de la URL única de arriba.')
                     ->schema([
-                        Forms\Components\Repeater::make('urls_secciones')
-                            ->label('URLs')
-                            ->simple(
-                                Forms\Components\TextInput::make('url')
-                                    ->label('URL')
-                                    ->placeholder('https://www.mercadolibre.com.mx/ofertas...')
-                                    ->url()
-                                    ->rules(['required', 'url', 'starts_with:https://'])
-                                    ->required(),
-                            )
-                            ->default([])
-                            ->addActionLabel('Añadir URL')
-                            ->helperText('Cada URL debe comenzar con https://'),
+                        Forms\Components\Textarea::make('urls_secciones')
+                            ->label('URLs (una por línea)')
+                            ->placeholder("https://www.mercadolibre.com.mx/ofertas\nhttps://www.walmart.com.mx/shop/ofertas-flash-walmart")
+                            ->rows(6)
+                            ->helperText('Escribe una URL por línea. Todas deben comenzar con https://')
+                            ->columnSpanFull(),
                     ])
                     ->collapsible(),
 

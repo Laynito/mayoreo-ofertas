@@ -45,5 +45,23 @@ class Producto extends Model
             ProcessTelegramPost::dispatch($producto)->delay($nextAt);
             Cache::put('telegram_next_run_at', $nextAt->copy()->addSeconds(5), 3600);
         });
+
+        // Si el SKU ya existía y el precio bajó, notificar a Telegram (nuevo descuento)
+        static::updated(function (Producto $producto): void {
+            if (! $producto->wasChanged('precio_actual')) {
+                return;
+            }
+            $precioAnterior = (float) $producto->getOriginal('precio_actual');
+            $precioNuevo = (float) $producto->precio_actual;
+            if ($precioAnterior <= 0 || $precioNuevo >= $precioAnterior) {
+                return;
+            }
+            $nextAt = Carbon::parse(Cache::get('telegram_next_run_at', now()));
+            if ($nextAt->isPast()) {
+                $nextAt = now();
+            }
+            ProcessTelegramPost::dispatch($producto)->delay($nextAt);
+            Cache::put('telegram_next_run_at', $nextAt->copy()->addSeconds(5), 3600);
+        });
     }
 }

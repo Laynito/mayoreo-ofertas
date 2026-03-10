@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Marketplace;
 use App\Models\Producto;
 use App\Models\ProductoPrecioHistorial;
 use Illuminate\Console\Command;
@@ -15,7 +16,7 @@ class RunScraperCommand extends Command
 {
     protected $signature = 'app:run-scraper';
 
-    protected $description = 'Ejecuta el scraper de Python (scraper_ml.py) y luego productos:sync-affiliate --send-telegram';
+    protected $description = 'Ejecuta los scrapers de Python (Mercado Libre y Walmart si están activos) y luego productos:sync-affiliate --send-telegram';
 
     private function writeScraperStatus(string $status, ?string $finishedAt = null): void
     {
@@ -50,15 +51,6 @@ class RunScraperCommand extends Command
             });
 
         $pythonBinary = base_path('python/venv/bin/python');
-        $pythonScript = base_path('python/scraper_ml.py');
-
-        if (! is_file($pythonScript)) {
-            $this->error('No se encuentra python/scraper_ml.py');
-            $this->writeScraperStatus('failed', now()->toIso8601String());
-            Log::warning('Scraper fallido: no se encuentra python/scraper_ml.py');
-            return self::FAILURE;
-        }
-
         if (! is_file($pythonBinary)) {
             $this->error('No se encuentra python/venv/bin/python. Crea el venv en python/ e instala dependencias.');
             $this->writeScraperStatus('failed', now()->toIso8601String());
@@ -66,36 +58,50 @@ class RunScraperCommand extends Command
             return self::FAILURE;
         }
 
-        // -u = salida sin buffer para ver progreso en tiempo real
-        $command = [$pythonBinary, '-u', $pythonScript];
-
-        $this->info('Ejecutando scraper de Python en vivo (puede tardar 2-5 min; salida en tiempo real)...');
-        $process = Process::path(base_path())
-            ->timeout(300)
-            ->start($command);
-
-        while ($process->running()) {
-            $newOut = $process->latestOutput();
-            $newErr = $process->latestErrorOutput();
-            if ($newOut !== '') {
-                $this->line($newOut);
-            }
-            if ($newErr !== '') {
-                $this->error($newErr);
-            }
-            usleep(200000); // 200 ms
+        $scripts = [
+            base_path('python/scraper_ml.py') => 'Mercado Libre',
+        ];
+        if (Marketplace::walmartActivo()) {
+            $scripts[base_path('python/scraper_walmart.py')] = 'Walmart';
         }
-        $this->line($process->latestOutput());
-        if ($process->latestErrorOutput() !== '') {
-            $this->error($process->latestErrorOutput());
+        if (Marketplace::coppelActivo()) {
+            $scripts[base_path('python/scraper_coppel.py')] = 'Coppel';
         }
-        $result = $process->wait();
 
-        if (! $result->successful()) {
-            $this->error('El scraper finalizó con código: ' . $result->exitCode());
-            $this->writeScraperStatus('failed', now()->toIso8601String());
-            Log::warning('Scraper fallido: proceso Python salió con código ' . $result->exitCode());
-            return self::FAILURE;
+        foreach ($scripts as $pythonScript => $label) {
+            if (! is_file($pythonScript)) {
+                $this->warn("No se encuentra {$pythonScript}; se omite {$label}.");
+                continue;
+            }
+            $this->info("Ejecutando scraper {$label} (puede tardar unos minutos; salida en tiempo real)...");
+            $command = [$pythonBinary, '-u', $pythonScript];
+            $process = Process::path(base_path())
+                ->timeout(300)
+                ->start($command);
+
+            while ($process->running()) {
+                $newOut = $process->latestOutput();
+                $newErr = $process->latestErrorOutput();
+                if ($newOut !== '') {
+                    $this->line($newOut);
+                }
+                if ($newErr !== '') {
+                    $this->error($newErr);
+                }
+                usleep(200000);
+            }
+            $this->line($process->latestOutput());
+            if ($process->latestErrorOutput() !== '') {
+                $this->error($process->latestErrorOutput());
+            }
+            $result = $process->wait();
+
+            if (! $result->successful()) {
+                $this->error("Scraper {$label} finalizó con código: " . $result->exitCode());
+                $this->writeScraperStatus('failed', now()->toIso8601String());
+                Log::warning("Scraper fallido: {$label} salió con código " . $result->exitCode());
+                return self::FAILURE;
+            }
         }
 
         $this->info('Scraper finalizado. Sincronizando afiliados y encolando Telegram...');

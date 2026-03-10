@@ -8,8 +8,8 @@ use Illuminate\Database\Seeder;
 class MarketplaceSeeder extends Seeder
 {
     /**
-     * Inserta el marketplace Mercado Libre con valores de config (.env).
-     * Ejecutar una vez: php artisan db:seed --class=MarketplaceSeeder
+     * Inserta los marketplaces Mercado Libre y Walmart.
+     * Ejecutar: php artisan db:seed --class=MarketplaceSeeder
      */
     public function run(): void
     {
@@ -22,6 +22,18 @@ class MarketplaceSeeder extends Seeder
                 'app_id' => config('services.mercadolibre.app_id'),
                 'es_activo' => true,
                 'configuracion' => ['matt_word' => config('services.mercadolibre.matt_word', 'mayoreo_cloud')],
+            ]
+        );
+
+        Marketplace::updateOrCreate(
+            ['slug' => 'walmart'],
+            [
+                'nombre' => 'Walmart México',
+                'url_busqueda' => 'https://www.walmart.com.mx/shop/ofertas-flash-walmart',
+                'affiliate_id' => null,
+                'app_id' => null,
+                'es_activo' => true,
+                'configuracion' => null,
             ]
         );
     }

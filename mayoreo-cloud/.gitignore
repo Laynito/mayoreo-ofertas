@@ -24,6 +24,9 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+# Capturas de debug de scrapers (ahora en storage/logs/scraper_debug/)
 error.png
 debug_seccion_*.png
+storage/logs/scraper_debug/
+storage/app/walmart_browser_profile/
 /mixelaneos

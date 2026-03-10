@@ -40,7 +40,8 @@ class SyncProductosAffiliateCommand extends Command
 
                 if ($sendTelegram) {
                     ProcessTelegramPost::dispatch($producto)
-                        ->delay(now()->addSeconds(5 * $telegramIndex));
+                        ->onQueue('default')
+                        ->delay(now()->addSeconds(8 * $telegramIndex));
                     $telegramIndex++;
                 }
             }

@@ -24,17 +24,34 @@ class EditMarketplace extends EditRecord
 
     public function mutateFormDataBeforeFill(array $data): array
     {
-        $config = $data['configuracion'] ?? [];
+        $config = is_array($data['configuracion'] ?? null) ? $data['configuracion'] : [];
         $urls = $config['urls'] ?? [];
-        $data['urls_secciones'] = array_map(fn (string $url): array => ['url' => $url], array_values(array_filter($urls)));
+        if (! is_array($urls)) {
+            $urls = [];
+        }
+        $urls = array_values(array_filter(array_map('strval', $urls)));
+        $data['urls_secciones'] = implode("\n", $urls);
+        $data['configuracion'] = $config;
         unset($data['configuracion']['urls']);
         return $data;
     }
 
     public function mutateFormDataBeforeSave(array $data): array
     {
-        $urls = array_values(array_filter(array_column($data['urls_secciones'] ?? [], 'url')));
-        $data['configuracion'] = $data['configuracion'] ?? [];
+        $text = is_string($data['urls_secciones'] ?? null) ? trim($data['urls_secciones']) : '';
+        $lines = $text === '' ? [] : preg_split('/\r\n|\r|\n/', $text);
+        $urls = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line !== '' && str_starts_with($line, 'https://')) {
+                $urls[] = $line;
+            }
+        }
+        $urls = array_values(array_filter($urls));
+
+        $existing = is_array($this->record->configuracion ?? null) ? $this->record->configuracion : [];
+        $incoming = is_array($data['configuracion'] ?? null) ? $data['configuracion'] : [];
+        $data['configuracion'] = array_merge($existing, $incoming);
         $data['configuracion']['urls'] = $urls;
         unset($data['urls_secciones']);
         return $data;

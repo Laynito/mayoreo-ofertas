@@ -5,6 +5,7 @@ Usa mysql-connector-python. Lee .env de Laravel (incl. contraseña con #).
 Selectores para listado ML México en vivo (ofertas generales + relámpago).
 """
 
+import hashlib
 import json
 import os
 import random
@@ -12,10 +13,13 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Cargar .env de Laravel (directorio raíz del proyecto) — respeta comillas para contraseñas con #
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
+# Capturas de debug (captcha, sin productos, etc.) — misma ruta que Walmart
+DEBUG_DIR = PROJECT_ROOT / "storage" / "logs" / "scraper_debug"
 
 def _cargar_env():
     if not ENV_PATH.exists():
@@ -63,10 +67,10 @@ SELECTOR_DESCUENTO_PILL = "span.andes-money-amount__discount, .poly-price__disc-
 URL_BUSQUEDA = os.environ.get("ML_SEARCH_URL", "https://listado.mercadolibre.com.mx/ofertas")
 # URL alternativa si la principal de ofertas falla (p. ej. login/captcha)
 URL_OFERTAS_ALTERNATIVA = "https://www.mercadolibre.com.mx/ofertas#nav-header"
-# Secciones de ofertas ML. Usamos www (mismo dominio que homepage) para no disparar muro de login de listado.
+# Secciones de ofertas ML (fallback si no hay URLs en panel). Usamos www para no disparar muro de login.
 OFFER_URLS = [
-    "https://www.mercadolibre.com.mx/ofertas",  # Ofertas generales (www = misma sesión que _pasar_filtro_ml)
-    "https://www.mercadolibre.com.mx/ofertas?container_id=MLM779363-1&promotion_type=lightning#filter_applied=promotion_type&filter_position=2&is_recommended_domain=false&origin=scut",  # Ofertas relámpago
+    "https://www.mercadolibre.com.mx/ofertas",  # Ofertas generales
+    "https://www.mercadolibre.com.mx/ofertas?container_id=MLM779363-1&promotion_type=lightning#filter_applied=promotion_type&filter_position=2&origin=qcat",  # Ofertas relámpago
 ]
 TIENDA = "Mercado Libre"
 # User-Agent real: Chrome actualizado para reducir bloqueos (ML detecta bots por UA antiguo)
@@ -227,6 +231,23 @@ def _descuento_desde_pill(card) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _sku_desde_url(url: str) -> str:
+    """
+    Extrae un SKU estable para Mercado Libre desde la URL.
+    - Si hay ID tipo MLM/MLA/MLB + dígitos (y opcional _variante), usa ese ID normalizado.
+    - Si no, usa MD5 de la URL normalizada (determinista; evita duplicados por hash() aleatorio).
+    """
+    if not (url or "").strip():
+        return hashlib.md5(b"").hexdigest()[:16]
+    # Normalizar: quitar fragmento y query para que la misma página dé siempre el mismo SKU
+    parsed = urlparse(url)
+    url_normalizada = f"{parsed.scheme or 'https'}://{parsed.netloc or ''}{parsed.path or ''}".rstrip("/")
+    sku_match = re.search(r"(MLM|MLA|MLB)\d+", url_normalizada)
+    if sku_match:
+        return sku_match.group(0).replace("-", "")
+    return hashlib.md5(url_normalizada.encode("utf-8")).hexdigest()[:16]
+
+
 def extraer_productos(page, card_selector: str | None = None) -> list[dict]:
     """Extrae productos usando selectores de tarjetas (por defecto CARD_SELECTOR)."""
     cards = page.query_selector_all(card_selector or CARD_SELECTOR)
@@ -238,8 +259,7 @@ def extraer_productos(page, card_selector: str | None = None) -> list[dict]:
             if not url_producto_raw:
                 continue
             url_producto = _url_producto_absoluta(url_producto_raw) or url_producto_raw
-            sku_match = re.search(r"(MLM|MLA|MLB)\d+", url_producto)
-            sku = sku_match.group(0).replace("-", "") if sku_match else str(abs(hash(url_producto)))[:16]
+            sku = _sku_desde_url(url_producto)
 
             img_el = _query_one(card, SELECTOR_IMAGEN)
             url_imagen = None
@@ -327,10 +347,16 @@ def _get_mercado_libre_from_db() -> dict | None:
         row = cursor.fetchone()
         cursor.close()
         conn.close()
-        if row and row.get("configuracion") is not None and isinstance(row["configuracion"], str):
-            try:
-                row["configuracion"] = json.loads(row["configuracion"])
-            except (TypeError, ValueError):
+        if row and row.get("configuracion") is not None:
+            raw = row["configuracion"]
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="replace")
+            if isinstance(raw, str):
+                try:
+                    row["configuracion"] = json.loads(raw)
+                except (TypeError, ValueError):
+                    row["configuracion"] = {}
+            elif not isinstance(row["configuracion"], dict):
                 row["configuracion"] = {}
         return row
     except Exception as e:
@@ -339,21 +365,23 @@ def _get_mercado_libre_from_db() -> dict | None:
 
 
 def guardar_en_mysql(productos: list[dict]) -> None:
-    """Inserta o actualiza productos en MySQL con mysql-connector-python (ON DUPLICATE KEY UPDATE por SKU)."""
+    """Inserta o actualiza productos en MySQL (ON DUPLICATE KEY UPDATE por SKU o url_producto_hash)."""
+    import hashlib
     conn = _get_db_connection()
     cursor = conn.cursor()
 
     sql = """
-    INSERT INTO productos (nombre, sku, precio_actual, precio_original, descuento, url_producto, url_imagen, tienda, created_at, updated_at)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    INSERT INTO productos (nombre, sku, precio_actual, precio_original, descuento, url_producto, url_producto_hash, url_imagen, tienda, created_at, updated_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
-        precio_actual = VALUES(precio_actual),
+        precio_actual   = VALUES(precio_actual),
         precio_original = VALUES(precio_original),
-        descuento = VALUES(descuento),
-        url_imagen = VALUES(url_imagen),
-        updated_at = NOW()
+        descuento       = VALUES(descuento),
+        url_imagen      = VALUES(url_imagen),
+        updated_at      = NOW()
     """
     for p in productos:
+        url_hash = hashlib.sha256((p["url_producto"] or "").encode()).hexdigest()
         cursor.execute(sql, (
             p["nombre"],
             p["sku"],
@@ -361,6 +389,7 @@ def guardar_en_mysql(productos: list[dict]) -> None:
             p["precio_original"],
             p["descuento"],
             p["url_producto"],
+            url_hash,
             p["url_imagen"],
             p["tienda"],
         ))
@@ -375,10 +404,9 @@ def _sku_de_producto(p: dict) -> str | None:
     sku = (p.get("sku") or "").strip()
     if sku:
         return sku
-    url = (p.get("url") or "").strip()
+    url = (p.get("url_producto") or p.get("url") or "").strip()
     if url:
-        # ML: .../MLM123456_123 -> MLM123456_123
-        return url.split("/")[-1].split("?")[0] or None
+        return _sku_desde_url(url)
     return None
 
 
@@ -504,7 +532,8 @@ def main():
 
     if not os.environ.get("DB_HOST"):
         print("[INFO] DB_HOST no definido en .env. Configura DB_* y usa MySQL.", file=sys.stderr)
-    screenshot_path = PROJECT_ROOT / "error.png"
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    screenshot_path = DEBUG_DIR / "error.png"
     TIMEOUT_SELECTOR = 60000
     card_selector = CARD_SELECTOR
 
@@ -551,10 +580,10 @@ def main():
                     productos_por_sku[sku] = p
             pct_fin = int(((i + 1) / total_secciones) * 100)
             if not lista:
-                debug_png = PROJECT_ROOT / f"debug_seccion_{i+1}.png"
+                debug_png = DEBUG_DIR / f"ml_debug_seccion_{i+1}.png"
                 try:
                     page.screenshot(path=str(debug_png))
-                    print(f"[*] [{pct_fin:3d}% ] Sin productos. Captura: {debug_png.name}")
+                    print(f"[*] [{pct_fin:3d}% ] Sin productos. Captura: storage/logs/scraper_debug/{debug_png.name}")
                 except Exception:
                     print(f"[*] [{pct_fin:3d}% ] Sin productos en esta sección.")
             else:
@@ -572,7 +601,7 @@ def main():
     productos = list(productos_por_sku.values()) if productos_por_sku else []
     if not productos:
         print("[WARN] No se encontraron productos en ninguna sección.", file=sys.stderr)
-        print("[*] Revisa debug_seccion_*.png para ver si ML muestra captcha o bloqueo.", file=sys.stderr)
+        print("[*] Revisa storage/logs/scraper_debug/ml_debug_*.png para ver si ML muestra captcha o bloqueo.", file=sys.stderr)
         print("[*] Prueba con HEADLESS=0 para abrir el navegador visible: HEADLESS=0 python scraper_ml.py", file=sys.stderr)
         return
 

@@ -67,6 +67,18 @@ php artisan queue:work
 - **Parece que no hace nada** → El worker queda en espera; es normal. Usa `php artisan queue:work --once` para procesar un job y salir.
 - Requiere `QUEUE_CONNECTION=database` en `.env` y la tabla `jobs` (migraciones ejecutadas).
 
+## Permisos (storage/logs) - "Permission denied" en laravel.log
+
+Si Laravel no puede escribir en `storage/logs/laravel.log`, en el servidor ejecuta (ajusta el usuario si no es `www-data`):
+
+```bash
+cd /home/mayoreo/htdocs/mayoreo-cloud
+sudo chown -R www-data:www-data storage bootstrap/cache
+sudo chmod -R 775 storage bootstrap/cache
+```
+
+Si usas **nginx** o otro usuario para PHP-FPM, sustituye `www-data` por ese usuario (`nginx`, `apache`, etc.). Para ver con qué usuario corre PHP: `ps aux | grep php` o en el panel del VPS.
+
 ## License
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).

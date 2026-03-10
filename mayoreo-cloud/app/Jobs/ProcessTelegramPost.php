@@ -14,13 +14,26 @@ class ProcessTelegramPost implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public int $tries = 10;
+    public int $backoff = 35;
+
     public function __construct(
         public Producto $producto
     ) {}
 
     public function handle(TelegramService $telegram): void
     {
-        sleep(2);
-        $telegram->sendOffer($this->producto);
+        $ok = $telegram->sendOffer($this->producto);
+
+        if (! $ok) {
+            // Si Telegram devolvió retry_after, esperar ese tiempo antes del siguiente intento
+            $retryAfter = $telegram->getLastRetryAfter();
+            if ($retryAfter > 0) {
+                $this->release($retryAfter + 2);
+                return;
+            }
+            // Otro error: reintentar con backoff estándar
+            $this->release($this->backoff);
+        }
     }
 }
