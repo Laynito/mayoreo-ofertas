@@ -19,6 +19,10 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('app:run-scraper')->everyThirtyMinutes();
         $schedule->command('app:limpiar-ofertas')->dailyAt('03:00');
         $schedule->command('queue:work --stop-when-empty')->everyMinute();
+        // Facebook: 1–3 publicaciones al día (horarios de buen engagement)
+        $schedule->command('facebook:publish')->dailyAt('08:00');
+        $schedule->command('facebook:publish')->dailyAt('13:00');
+        $schedule->command('facebook:publish')->dailyAt('18:00');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

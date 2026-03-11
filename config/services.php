@@ -51,4 +51,19 @@ return [
         'chat_id_free' => env('TELEGRAM_CHAT_ID_FREE'),
     ],
 
+    'facebook' => [
+        'page_id' => env('FB_PAGE_ID'),
+        'page_access_token' => env('FB_PAGE_ACCESS_TOKEN'),
+        'graph_version' => env('FB_GRAPH_VERSION', 'v20.0'),
+    ],
+
+    /*
+     * Admitad: red de afiliados. Credenciales en cuenta Admitad → Webmaster → Configuración → Mostrar credenciales.
+     */
+    'admitad' => [
+        'client_id' => env('ADMITAD_CLIENT_ID'),
+        'client_secret' => env('ADMITAD_CLIENT_SECRET'),
+        'scope' => env('ADMITAD_SCOPE', 'advcampaigns advcampaigns_for_website banners websites private_data coupons deeplink_generator short_link'),
+    ],
+
 ];

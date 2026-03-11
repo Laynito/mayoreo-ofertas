@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Publica en la Fan Page de Facebook las ofertas con mayor descuento que no se hayan publicado hoy.
+Opcionalmente también publica en grupos (FB_GROUP_IDS + FB_USER_ACCESS_TOKEN con permiso publish_to_groups).
 
 Credenciales: primero lee del panel (Marketplace → Facebook → Datos de la app de Facebook).
 Si no hay Page ID o Token ahí, usa .env (FB_PAGE_ACCESS_TOKEN, FB_PAGE_ID).
@@ -52,6 +53,7 @@ TOP_N = int(os.environ.get("FB_TOP_N", "3"))
 APP_URL = (os.environ.get("APP_URL") or "http://localhost").rstrip("/")
 GRAPH_API_VERSION = "v20.0"
 DELAY_BETWEEN_POSTS = 8  # segundos entre publicaciones
+DELAY_BETWEEN_GROUPS = 5  # segundos entre publicaciones en distintos grupos
 
 
 def _get_db_connection():
@@ -220,6 +222,38 @@ def _publicar_foto(page_id: str, access_token: str, image_url: str, message: str
         return False
 
 
+def _grupos_configurados() -> list[str]:
+    """Devuelve lista de IDs de grupos desde FB_GROUP_IDS (separados por coma)."""
+    raw = (os.environ.get("FB_GROUP_IDS") or "").strip()
+    if not raw:
+        return []
+    return [g.strip() for g in raw.split(",") if g.strip()]
+
+
+def _publicar_en_grupo_feed(group_id: str, user_token: str, message: str, link: str) -> bool:
+    """
+    Publica en el feed del grupo (message + link). Requiere token de USUARIO con permiso publish_to_groups.
+    El link muestra la vista previa (og:image) si la URL la tiene.
+    """
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{group_id}/feed"
+    payload = {
+        "message": message,
+        "link": link,
+        "access_token": user_token,
+    }
+    try:
+        r = requests.post(url, data=payload, timeout=30)
+        data = r.json()
+        if r.ok and data.get("id"):
+            print(f"  [OK] Grupo {group_id} (post_id: {data.get('id')})")
+            return True
+        print(f"  [ERROR] Grupo {group_id} {r.status_code}: {data}", file=sys.stderr)
+        return False
+    except requests.RequestException as e:
+        print(f"  [ERROR] Grupo {group_id} {e}", file=sys.stderr)
+        return False
+
+
 def main() -> int:
     if not os.environ.get("DB_HOST"):
         print("Configura DB_HOST (y DB_*) en .env para leer productos y credenciales.", file=sys.stderr)
@@ -235,101 +269,136 @@ def main() -> int:
         if not token:
             token = (token_bd or "").strip()
 
-    if not token:
+    group_ids_early = _grupos_configurados()
+    user_token_early = (os.environ.get("FB_USER_ACCESS_TOKEN") or "").strip()
+    has_groups = bool(group_ids_early and user_token_early)
+
+    if not token and not has_groups:
         print(
-            "Configura el Token de Acceso de Página en:\n"
-            "  • Panel → Marketplace → Facebook → Datos de la app de Facebook → Token de acceso de página\n"
-            "  • o en .env como FB_PAGE_ACCESS_TOKEN",
+            "Configura al menos uno: Fan Page (FB_PAGE_ID + FB_PAGE_ACCESS_TOKEN) o Grupos (FB_GROUP_IDS + FB_USER_ACCESS_TOKEN).",
             file=sys.stderr,
         )
         return 1
-    if not page_id:
+    if not page_id and not has_groups:
         print(
-            "Configura el Page ID en:\n"
-            "  • Panel → Marketplace → Facebook → Datos de la app de Facebook → Page ID\n"
-            "  • o en .env como FB_PAGE_ID",
+            "Configura FB_PAGE_ID o FB_GROUP_IDS con FB_USER_ACCESS_TOKEN.",
             file=sys.stderr,
         )
         return 1
 
-    # Verificar que el token sea de PÁGINA (no de usuario); si es de usuario dará 403 al publicar
-    try:
-        r = requests.get(
-            f"https://graph.facebook.com/{GRAPH_API_VERSION}/me",
-            params={"fields": "id,name", "access_token": token},
-            timeout=10,
-        )
-        if r.ok:
-            data = r.json()
-            token_id = str(data.get("id", ""))
-            token_name = data.get("name", "")
-            if token_id != page_id:
-                print(
-                    f"[AVISO] El token es de usuario '{token_name}' (id={token_id}), no de la página (id={page_id}).",
-                    file=sys.stderr,
-                )
-                # Intentar obtener el token de la página desde me/accounts con este token de usuario
-                try:
-                    r2 = requests.get(
-                        f"https://graph.facebook.com/{GRAPH_API_VERSION}/me/accounts",
-                        params={"access_token": token, "fields": "id,name,access_token"},
-                        timeout=10,
-                    )
-                    if r2.ok:
-                        data2 = r2.json()
-                        for item in (data2.get("data") or []):
-                            if str(item.get("id")) == page_id:
-                                page_token = (item.get("access_token") or "").strip()
-                                if page_token:
-                                    print(
-                                        "\n[SOLUCIÓN] Token de la PÁGINA (cópialo en .env como FB_PAGE_ACCESS_TOKEN):\n"
-                                        f"{page_token}\n",
-                                        file=sys.stderr,
-                                    )
-                                break
-                        else:
-                            print(
-                                "No se encontró la página con id {} en me/accounts. "
-                                "Haz GET me/accounts en el Explorador y copia el 'access_token' de tu página."
-                                .format(page_id),
-                                file=sys.stderr,
-                            )
-                except requests.RequestException:
+    # Verificar que el token sea de PÁGINA (no de usuario) solo si vamos a publicar en página
+    if page_id and token:
+        try:
+            r = requests.get(
+                f"https://graph.facebook.com/{GRAPH_API_VERSION}/me",
+                params={"fields": "id,name", "access_token": token},
+                timeout=10,
+            )
+            if r.ok:
+                data = r.json()
+                token_id = str(data.get("id", ""))
+                token_name = data.get("name", "")
+                if token_id != page_id:
                     print(
-                        "Pasos: Explorador API Graph → Genera token (usuario) con pages_* → GET me/accounts "
-                        "→ Copia el 'access_token' DENTRO del objeto de la página 'Cazador De Precios'.",
+                        f"[AVISO] El token es de usuario '{token_name}' (id={token_id}), no de la página (id={page_id}).",
                         file=sys.stderr,
                     )
-                return 1
-            print(f"Token OK (página: {token_name})")
-    except requests.RequestException:
-        pass
+                    try:
+                        r2 = requests.get(
+                            f"https://graph.facebook.com/{GRAPH_API_VERSION}/me/accounts",
+                            params={"access_token": token, "fields": "id,name,access_token"},
+                            timeout=10,
+                        )
+                        if r2.ok:
+                            data2 = r2.json()
+                            for item in (data2.get("data") or []):
+                                if str(item.get("id")) == page_id:
+                                    page_token = (item.get("access_token") or "").strip()
+                                    if page_token:
+                                        print(
+                                            "\n[SOLUCIÓN] Token de la PÁGINA (cópialo en .env como FB_PAGE_ACCESS_TOKEN):\n"
+                                            f"{page_token}\n",
+                                            file=sys.stderr,
+                                        )
+                                    break
+                            else:
+                                print(
+                                    "No se encontró la página con id {} en me/accounts. "
+                                    "Haz GET me/accounts en el Explorador y copia el 'access_token' de tu página."
+                                    .format(page_id),
+                                    file=sys.stderr,
+                                )
+                    except requests.RequestException:
+                        print(
+                            "Pasos: Explorador API Graph → Genera token (usuario) con pages_* → GET me/accounts "
+                            "→ Copia el 'access_token' DENTRO del objeto de la página.",
+                            file=sys.stderr,
+                        )
+                    return 1
+                print(f"Token OK (página: {token_name})")
+        except requests.RequestException:
+            pass
 
     productos = _productos_no_publicados_hoy(TOP_N)
     if not productos:
         print("No hay ofertas elegibles (50%+ descuento, con imagen/afiliado y no publicadas hoy).")
         return 0
 
-    print(f"Publicando {len(productos)} oferta(s) en la Fan Page (máx. no publicadas hoy)...")
+    group_ids = _grupos_configurados()
+    user_token = (os.environ.get("FB_USER_ACCESS_TOKEN") or "").strip()
+    publish_to_groups = bool(group_ids and user_token)
+    if group_ids and not user_token:
+        print("[AVISO] FB_GROUP_IDS está configurado pero falta FB_USER_ACCESS_TOKEN (token de usuario con publish_to_groups). Se publicará solo en la página.", file=sys.stderr)
+    if publish_to_groups:
+        print(f"También se publicará en {len(group_ids)} grupo(s).")
+
+    if page_id and token:
+        print(f"Publicando {len(productos)} oferta(s) en la Fan Page (máx. no publicadas hoy)...")
+    else:
+        print(f"Publicando {len(productos)} oferta(s) en grupo(s)...")
     ok = 0
     for i, p in enumerate(productos):
+        link = (p.get("url_afiliado") or p.get("url_producto") or "").strip()
+        if not link and not (page_id and token):
+            print(f"  [SKIP] Sin link (necesario para grupos): {p.get('nombre', '')[:50]}")
+            continue
         imagen = _imagen_publica(p.get("url_imagen"))
-        if not imagen:
+        if page_id and token and not imagen:
             print(f"  [SKIP] Sin imagen pública: {p.get('nombre', '')[:50]}")
             continue
+        if not page_id and not link:
+            continue
 
-        link = (p.get("url_afiliado") or p.get("url_producto") or "").strip()
         nombre = p.get("nombre") or ""
         precio_actual = p.get("precio_actual")
         precio_original = p.get("precio_original")
         descuento = p.get("descuento")
         tienda = p.get("tienda")
-        msg = _texto_post(nombre, precio_actual, precio_original, link, descuento=descuento, tienda=tienda)
+        msg = _texto_post(nombre, precio_actual, precio_original, link or "#", descuento=descuento, tienda=tienda)
 
         print(f"[{i+1}/{len(productos)}] {nombre[:50]}...")
-        if _publicar_foto(page_id, token, imagen, msg):
+        page_ok = _publicar_foto(page_id, token, imagen, msg) if (page_id and token and imagen) else False
+
+        if page_ok and publish_to_groups and link:
+            for gi, gid in enumerate(group_ids):
+                if gi > 0:
+                    time.sleep(DELAY_BETWEEN_GROUPS)
+                _publicar_en_grupo_feed(gid, user_token, msg, link)
+
+        if page_ok:
             _marcar_publicado(p["id"])
             ok += 1
+        elif publish_to_groups and link:
+            # Sin página configurada o falló página: si al menos un grupo recibe el post, marcar como publicado
+            group_ok = False
+            for gid in group_ids:
+                if _publicar_en_grupo_feed(gid, user_token, msg, link):
+                    group_ok = True
+                time.sleep(DELAY_BETWEEN_GROUPS)
+            if group_ok:
+                _marcar_publicado(p["id"])
+                ok += 1
+
         if i < len(productos) - 1:
             time.sleep(DELAY_BETWEEN_POSTS)
 
