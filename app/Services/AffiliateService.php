@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Http\Integrations\MercadoLibre\MercadoLibreConnector;
 use App\Http\Integrations\MercadoLibre\Requests\GetAffiliateLinkRequest;
 use App\Models\Marketplace;
+use App\Models\Producto;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
@@ -54,8 +55,9 @@ class AffiliateService
      * Genera el enlace según la tienda (o la URL si tienda viene vacía). ML siempre lleva parámetros de afiliado;
      * Coppel y otros usan su código desde config (configuracion.affiliate_params).
      * Si la URL es de Mercado Libre se trata como ML aunque tienda no lo indique.
+     * Para ML, si se pasa $producto con nombre, se genera enlace a búsqueda ordenada por precio (más barato primero).
      */
-    public function getAffiliateLinkForProduct(string $urlProducto, ?string $tienda = null): string
+    public function getAffiliateLinkForProduct(string $urlProducto, ?string $tienda = null, ?Producto $producto = null): string
     {
         $urlProducto = trim($urlProducto);
         if ($urlProducto === '') {
@@ -63,12 +65,45 @@ class AffiliateService
         }
         $slug = $this->normalizeTiendaToSlug($tienda) ?? $this->slugFromUrl($urlProducto);
         if ($slug === 'mercado_libre') {
+            $searchUrl = $this->getMercadoLibreSearchByPriceUrl($producto);
+            if ($searchUrl !== null) {
+                return $this->appendAffiliateParams($searchUrl);
+            }
             return $this->getCanonicalAffiliateLink($urlProducto);
         }
         if ($slug !== null) {
             return $this->appendMarketplaceAffiliateParams($urlProducto, $slug);
         }
         return $urlProducto;
+    }
+
+    /**
+     * Para ML: enlace a listado ordenado por precio (más barato primero) usando el nombre del producto.
+     * Así el usuario ve las opciones más económicas y no se pierde la venta. Devuelve null si no hay nombre.
+     */
+    public function getMercadoLibreSearchByPriceUrl(?Producto $producto): ?string
+    {
+        if ($producto === null || trim((string) $producto->nombre) === '') {
+            return null;
+        }
+        $term = $this->slugifyForMlSearch(trim($producto->nombre));
+        if ($term === '') {
+            return null;
+        }
+        $base = 'https://listado.mercadolibre.com.mx/' . $term;
+        return $base . '?_Order=PRICE_ASC';
+    }
+
+    /**
+     * Convierte el nombre del producto a un término de búsqueda para la URL de listado ML (path).
+     */
+    private function slugifyForMlSearch(string $nombre): string
+    {
+        $s = mb_strtolower($nombre);
+        $s = preg_replace('/[^\p{L}\p{N}\s\-]/u', ' ', $s);
+        $s = preg_replace('/\s+/', '-', trim($s));
+        $s = substr($s, 0, 80);
+        return $s === '' ? '' : rawurlencode($s);
     }
 
     /**

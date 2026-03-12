@@ -13,25 +13,34 @@ class SyncProductosAffiliateCommand extends Command
     protected $signature = 'productos:sync-affiliate
                             {--send-telegram : Enviar a Telegram después de generar url_afiliado}';
 
-    protected $description = 'Genera url_afiliado para productos que no lo tienen (ej. insertados por el scraper Python). Opcional: envía a Telegram (orden: ML, Coppel, otros por prioridad de marketplace).';
+    protected $description = 'Genera url_afiliado y/o envía a Telegram. Con --send-telegram procesa todos los que nunca se han enviado (last_sent_telegram_at null). Sin flag solo los que no tienen url_afiliado.';
 
     public function handle(AffiliateService $affiliate): int
     {
-        $query = Producto::query()
-            ->where(function ($q) {
+        $sendTelegram = $this->option('send-telegram');
+
+        // Con --send-telegram: enviar TODOS los que nunca se han enviado (no dejar productos "guardados")
+        // Sin flag: solo los que no tienen url_afiliado (comportamiento clásico)
+        $query = Producto::query()->whereNotNull('url_producto');
+
+        if ($sendTelegram) {
+            $query->whereNull('last_sent_telegram_at');
+        } else {
+            $query->where(function ($q) {
                 $q->whereNull('url_afiliado')->orWhere('url_afiliado', '');
-            })
-            ->whereNotNull('url_producto');
+            });
+        }
 
         $count = $query->count();
         if ($count === 0) {
-            $this->info('No hay productos sin url_afiliado.');
+            $this->info($sendTelegram ? 'No hay productos pendientes de enviar a Telegram.' : 'No hay productos sin url_afiliado.');
 
             return self::SUCCESS;
         }
 
-        $this->info("Procesando {$count} producto(s)...");
-        $sendTelegram = $this->option('send-telegram');
+        $this->info($sendTelegram
+            ? "Procesando {$count} producto(s) pendientes de Telegram..."
+            : "Procesando {$count} producto(s) sin url_afiliado...");
 
         $productos = $query->get();
 
@@ -57,8 +66,11 @@ class SyncProductosAffiliateCommand extends Command
 
         $telegramIndex = 0;
         foreach ($productos as $producto) {
-            $producto->url_afiliado = $affiliate->getAffiliateLinkForProduct($producto->url_producto, $producto->tienda);
-            $producto->saveQuietly();
+            $needsLink = $producto->url_afiliado === null || trim((string) $producto->url_afiliado) === '';
+            if ($needsLink) {
+                $producto->url_afiliado = $affiliate->getAffiliateLinkForProduct($producto->url_producto, $producto->tienda, $producto);
+                $producto->saveQuietly();
+            }
 
             if ($sendTelegram) {
                 ProcessTelegramPost::dispatch($producto)
