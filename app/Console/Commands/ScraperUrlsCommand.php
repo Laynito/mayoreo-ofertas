@@ -8,7 +8,7 @@ use Illuminate\Console\Command;
 class ScraperUrlsCommand extends Command
 {
     protected $signature = 'scraper:urls
-                            {--marketplace= : Solo este slug (mercado_libre, walmart, coppel, elektra)}';
+                            {--marketplace= : Solo este slug (mercado_libre, walmart, coppel, elektra, sams_club, bodega_aurrera)}';
 
     protected $description = 'Muestra qué URLs usará cada scraper (desde panel Marketplaces). Sirve para verificar que las URLs de secciones funcionan.';
 
@@ -19,7 +19,7 @@ class ScraperUrlsCommand extends Command
         $this->info('URLs que usan los scrapers (desde BD → marketplaces.configuracion.urls o url_busqueda):');
         $this->newLine();
 
-        foreach (['mercado_libre', 'walmart', 'coppel', 'elektra'] as $slug) {
+        foreach (['mercado_libre', 'walmart', 'coppel', 'elektra', 'sams_club', 'bodega_aurrera'] as $slug) {
             if ($solo !== null && $solo !== $slug) {
                 continue;
             }
@@ -30,11 +30,13 @@ class ScraperUrlsCommand extends Command
             $activo = $m ? $m->es_activo : false;
 
             $label = match($slug) {
-                'mercado_libre' => 'Mercado Libre',
-                'walmart'       => 'Walmart',
-                'coppel'        => 'Coppel',
-                'elektra'       => 'Elektra',
-                default         => $slug,
+                'mercado_libre'   => 'Mercado Libre',
+                'walmart'         => 'Walmart',
+                'coppel'          => 'Coppel',
+                'elektra'         => 'Elektra',
+                'sams_club'       => "Sam's Club",
+                'bodega_aurrera'  => 'Bodega Aurrera',
+                default           => $slug,
             };
             $this->line("<fg=cyan>--- {$label} (slug: {$slug}) ---</>");
             $this->line('Activo: ' . ($activo ? 'Sí' : 'No'));
@@ -64,10 +66,13 @@ class ScraperUrlsCommand extends Command
 
         $this->line('Para ejecutar scrapers:');
         $this->line('  php artisan app:run-scraper');
-        $this->line('O manualmente:');
-        $this->line('  python3 python/scraper_ml.py      # Mercado Libre');
-        $this->line('  python3 python/walmart_sitemap_scraper.py   # Walmart (sitemap)');
-        $this->line('  python3 python/scraper_elektra.py # Elektra (liquidación)');
+        $this->line('O manualmente (usar el Python del venv, NO "python3 venv/bin/python"):');
+        $this->line('  python/venv/bin/python python/scraper_ml.py                 # Mercado Libre');
+        $this->line('  python/venv/bin/python python/walmart_sitemap_scraper.py   # Walmart (sitemap, sin navegador)');
+        $this->line('  python/venv/bin/python python/scraper_coppel.py           # Coppel');
+        $this->line('  python/venv/bin/python python/scraper_elektra.py           # Elektra');
+        $this->line('  python/venv/bin/python python/scraper_sams.py               # Sam\'s Club');
+        $this->line('  python/venv/bin/python python/scraper_bodega_aurrera.py    # Bodega Aurrera');
 
         return self::SUCCESS;
     }

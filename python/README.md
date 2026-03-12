@@ -42,44 +42,39 @@ playwright install chromium
 
 Luego, para scrapear:
 
+**Importante:** desde la **raíz del proyecto** usa el Python del venv como comando (no ejecutes `python3 python/venv/bin/python` — eso da error "source code cannot contain null bytes"):
+
+```bash
+cd /home/mayoreo/htdocs/mayoreo-cloud
+python/venv/bin/python python/scraper_ml.py
+python/venv/bin/python python/walmart_sitemap_scraper.py   # Walmart: sitemap (sin navegador, recomendado)
+python/venv/bin/python python/scraper_coppel.py
+python/venv/bin/python python/scraper_elektra.py
+python/venv/bin/python python/scraper_sams.py
+python/venv/bin/python python/scraper_bodega_aurrera.py
+```
+
+O desde `python/` con el venv activado:
+
 ```bash
 cd /home/mayoreo/htdocs/mayoreo-cloud/python
 source venv/bin/activate
-python3 scraper_ml.py
+python scraper_ml.py
+python walmart_sitemap_scraper.py   # Walmart (solo sitemap)
+# etc.
 ```
 
-(Scrape en vivo: 2 secciones — ofertas generales + relámpago.)
-
-Scraper Walmart (misma lógica de SKU, tienda Walmart):
-
-```bash
-python3 scraper_walmart.py
-```
-
-**Walmart vía Sitemap (sin navegador, sin login)** — recomendado en VPS:
+**Walmart en VPS (la vía estable):** sitemap scraper. No abre navegador, no dispara PerimeterX. Las URLs deben ser índices de ofertas (Ofertas Flash, Liquidación, Ahorros Especiales).
 
 ```bash
 cd /home/mayoreo/htdocs/mayoreo-cloud
-source python/venv/bin/activate
-pip install -r python/requirements.txt
-python3 python/walmart_sitemap_scraper.py
+WALMART_OFERTAS_URLS="https://www.walmart.com.mx/shop/ofertas-flash-walmart" python/venv/bin/python python/walmart_sitemap_scraper.py
 ```
 
-O sin venv, si ya tienes `pip3` instalado:
-
-```bash
-cd /home/mayoreo/htdocs/mayoreo-cloud
-pip3 install -r python/requirements.txt
-python3 python/walmart_sitemap_scraper.py
-```
-
-**En un VPS** (sin pantalla): Walmart suele mostrar "Verifica tu identidad" (captcha). Para usar navegador virtual y dar tiempo a que cargue:
-
-```bash
-cd /home/mayoreo/htdocs/mayoreo-cloud
-apt install -y xvfb   # una vez
-HEADLESS=0 xvfb-run ./python/venv/bin/python -u python/scraper_walmart.py
-```
+O con varias URLs en `.env` o en Filament → Marketplaces → Walmart:
+- Ofertas Flash: `https://www.walmart.com.mx/shop/ofertas-flash-walmart`
+- Liquidación: `https://www.walmart.com.mx/browse/especiales/ofertas/360013_300279_300286`
+- Ahorros Especiales: `https://www.walmart.com.mx/browse/especiales/ahorros-especiales/360013_300279`
 
 Otra URL o ver el navegador:
 

@@ -1,0 +1,660 @@
+# Informe Técnico: Web Scraping de Walmart México, Sam's Club y Bodega Aurrera
+
+---
+
+## Introducción
+
+El web scraping se ha consolidado como una herramienta esencial para la obtención automatizada de datos en el ámbito del comercio electrónico, la inteligencia competitiva y la investigación de mercados. En México, tres de los sitios más relevantes para el análisis de precios, disponibilidad y catálogo de productos son Walmart México, Sam's Club y Bodega Aurrera. Sin embargo, extraer información de estos portales implica retos técnicos, legales y éticos particulares, así como la necesidad de seleccionar tecnologías adecuadas y estrategias robustas para superar obstáculos como la carga dinámica, la paginación, los CAPTCHAs y las protecciones anti-bot.
+
+Este informe ofrece una guía exhaustiva y actualizada sobre cómo abordar el scraping de estos tres sitios, cubriendo desde la elección de herramientas y lenguajes, el análisis de la estructura técnica de cada portal, los métodos recomendados de extracción de datos, la gestión de desafíos técnicos, hasta las alternativas legales y éticas, incluyendo el uso de APIs oficiales y servicios comerciales de scraping. Se incluyen ejemplos de código, tablas comparativas y recomendaciones prácticas para cada etapa del proceso.
+
+---
+
+## Tecnologías y Lenguajes Recomendados para Web Scraping
+
+### Panorama General de Herramientas y Lenguajes
+
+El lenguaje de programación más utilizado para web scraping es **Python**, gracias a su sintaxis sencilla, su ecosistema de librerías especializadas y la amplia comunidad de soporte. Otras opciones incluyen **R** (con paquetes como rvest), **C#** (con HtmlAgilityPack y Selenium), y soluciones en **JavaScript** para scraping en el navegador o con Node.js, aunque Python sigue siendo la opción preferida para la mayoría de los casos.
+
+Las principales librerías y frameworks para scraping en Python son:
+
+- **Requests**: Para realizar peticiones HTTP y obtener el HTML de la página.
+- **BeautifulSoup**: Para parsear y navegar el HTML de forma sencilla y flexible.
+- **lxml**: Para parsing rápido y soporte avanzado de XPath.
+- **Selenium**: Para automatizar navegadores reales, ideal para páginas con JavaScript dinámico.
+- **Scrapy**: Framework robusto para crawling y scraping a gran escala, con soporte para pipelines, middlewares y manejo de concurrencia.
+- **Playwright**: Alternativa moderna a Selenium, con soporte para múltiples navegadores y ejecución paralela eficiente.
+
+#### Comparativa de Herramientas
+
+| Herramienta      | Mejor para                   | Soporte JS | Escalabilidad | Facilidad de uso | Velocidad | Observaciones                    |
+|------------------|-----------------------------|------------|---------------|------------------|----------|----------------------------------|
+| BeautifulSoup    | HTML estático, principiantes | No         | Baja          | Muy alta         | Alta     | Ideal para tareas simples        |
+| Scrapy           | Crawling a gran escala       | No         | Muy alta      | Media            | Muy alta | Framework profesional            |
+| Selenium         | JS dinámico, interacción     | Sí         | Media         | Media            | Baja     | Simula usuario real, más lento   |
+| Playwright       | Web moderna, JS avanzado     | Sí         | Alta          | Media            | Alta     | Esperas automáticas, paralelismo |
+| lxml             | Parsing rápido, XPath        | No         | Media         | Media            | Muy alta | Requiere mayor conocimiento      |
+
+**BeautifulSoup** es ideal para comenzar y para páginas estáticas. **Selenium** y **Playwright** son imprescindibles para sitios que dependen de JavaScript para mostrar datos. **Scrapy** es la opción preferida para proyectos de scraping a gran escala, con crawling de múltiples páginas y manejo de pipelines de datos.
+
+#### Ejemplo Básico con BeautifulSoup y Requests
+
+```python
+import requests
+from bs4 import BeautifulSoup
+
+url = 'https://ejemplo.com/productos'
+headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+response = requests.get(url, headers=headers)
+soup = BeautifulSoup(response.text, 'html.parser')
+
+for producto in soup.find_all('div', class_='producto'):
+    nombre = producto.find('h2').text
+    precio = producto.find('span', class_='precio').text
+    print(f'{nombre}: {precio}')
+```
+Este patrón es la base para la mayoría de los scrapers simples, pero para sitios con JavaScript o protecciones anti-bot, será necesario emplear Selenium, Playwright o servicios comerciales.
+
+#### Ejemplo Básico con Selenium
+
+```python
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+
+driver = webdriver.Chrome()
+driver.get('https://ejemplo.com/productos')
+
+productos = driver.find_elements(By.CLASS_NAME, 'producto')
+for producto in productos:
+    nombre = producto.find_element(By.TAG_NAME, 'h2').text
+    precio = producto.find_element(By.CLASS_NAME, 'precio').text
+    print(f'{nombre}: {precio}')
+
+driver.quit()
+```
+Selenium permite interactuar con la página como un usuario real, lo que es clave para sitios que cargan datos dinámicamente.
+
+#### Ejemplo con Scrapy
+
+```python
+import scrapy
+
+class ProductosSpider(scrapy.Spider):
+    name = 'productos'
+    start_urls = ['https://ejemplo.com/productos']
+
+    def parse(self, response):
+        for producto in response.css('div.producto'):
+            yield {
+                'nombre': producto.css('h2::text').get(),
+                'precio': producto.css('span.precio::text').get(),
+            }
+        next_page = response.css('a.next::attr(href)').get()
+        if next_page:
+            yield response.follow(next_page, self.parse)
+```
+Scrapy es ideal para crawling de múltiples páginas y manejo de paginación.
+
+---
+
+## Consideraciones Legales y Éticas Específicas para México
+
+### Marco Legal Mexicano y Jurisprudencia Internacional
+
+El web scraping en México se encuentra en una zona gris legal, regulada principalmente por la **Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP)**, la legislación de derechos de autor y los términos de servicio de cada sitio web.
+
+#### Principios Clave de la LFPDPPP
+
+- **Datos personales**: Cualquier información que identifique o haga identificable a una persona física está protegida. El scraping de datos personales requiere consentimiento, salvo excepciones (fuentes de acceso público, disociación, etc.).
+- **Fuentes de acceso público**: Solo se consideran públicas aquellas bases de datos que la ley así lo disponga. La información obtenida ilícitamente no se considera pública.
+- **Consentimiento**: El tratamiento de datos personales requiere consentimiento, salvo excepciones legales. El consentimiento puede ser tácito si se informa mediante aviso de privacidad y no hay oposición.
+- **Responsabilidad**: El responsable debe adoptar medidas de seguridad y cumplir con los principios de licitud, finalidad, lealtad, consentimiento, calidad, proporcionalidad, información y responsabilidad.
+
+#### Derechos de Autor y Propiedad Intelectual
+
+- El contenido original de los sitios web está protegido por derechos de autor. Extraer y reutilizar contenido protegido sin autorización puede constituir infracción.
+- Los hechos (como precios o nombres de productos) no están protegidos por derechos de autor, pero la estructura de la base de datos sí podría estarlo en ciertos casos.
+
+#### Términos de Servicio y robots.txt
+
+- Muchos sitios prohíben explícitamente el scraping en sus términos de uso. Ignorar estas restricciones puede derivar en reclamaciones contractuales o bloqueos técnicos.
+- El archivo **robots.txt** indica las rutas permitidas o prohibidas para bots. Aunque no es legalmente vinculante, es una buena práctica ética respetarlo.
+
+#### Jurisprudencia Internacional Relevante
+
+- **hiQ Labs v. LinkedIn (EE.UU.)**: El scraping de datos públicos no viola la CFAA (Computer Fraud and Abuse Act) si no se eluden barreras técnicas como contraseñas o CAPTCHAs. Sin embargo, puede haber responsabilidad contractual si se violan los términos de servicio.
+- En la Unión Europea, el **GDPR** impone restricciones estrictas al procesamiento de datos personales, incluso si son públicos.
+
+#### Recomendaciones Prácticas
+
+- **Revisar y respetar los términos de servicio y robots.txt** de cada sitio.
+- **No extraer datos personales** sin consentimiento o base legal clara.
+- **Limitar la frecuencia de peticiones** para evitar sobrecargar servidores.
+- **No eludir barreras técnicas** como CAPTCHAs o autenticación sin justificación legal.
+- **Consultar con asesoría legal** en proyectos de scraping a gran escala o con fines comerciales.
+
+---
+
+## Análisis Técnico de los Sitios Web
+
+### Walmart México
+
+#### Estructura y Tecnologías
+
+- **Framework principal**: Walmart utiliza **Next.js** (React) para el frontend, lo que implica renderizado híbrido (SSR/CSR) y uso intensivo de JavaScript.
+- **Datos embebidos**: La mayoría de los datos de producto se encuentran en un script `<script id="__NEXT_DATA__" type="application/json">`, que contiene un JSON estructurado con toda la información relevante del producto, precios, disponibilidad, etc..
+- **Protección anti-bot**: Walmart implementa múltiples capas de protección:
+  - **Cabeceras y fingerprinting**: Verifica User-Agent, cookies, y otros headers.
+  - **CAPTCHAs**: Aparecen tras múltiples peticiones o patrones sospechosos.
+  - **Rotación de estructura HTML**: Cambios frecuentes en selectores y clases.
+  - **WAFs y CDN**: Uso de firewalls de aplicaciones web y redes de distribución de contenido para filtrar tráfico sospechoso.
+
+#### Ejemplo de Extracción de Datos
+
+```python
+from bs4 import BeautifulSoup
+import requests
+import json
+
+url = 'https://www.walmart.com.mx/producto/123456'
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/115.0 Safari/537.36"
+}
+response = requests.get(url, headers=headers)
+soup = BeautifulSoup(response.text, "html.parser")
+script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+if script_tag:
+    data = json.loads(script_tag.string)
+    product = data["props"]["pageProps"]["initialData"]["data"]["product"]
+    nombre = product.get("name")
+    precio = product.get("price", {}).get("price")
+    disponibilidad = product.get("availability", {}).get("status")
+    descripcion = product.get("description")
+    print(nombre, precio, disponibilidad, descripcion)
+```
+Este método es robusto y permite extraer datos estructurados sin depender de selectores HTML frágiles.
+
+#### Identificadores y Metadatos
+
+- **SKU**: Cada producto tiene un identificador único (SKU) visible en la URL y en el JSON embebido.
+- **UPC/EAN/GTIN**: Algunos productos incluyen estos identificadores en el JSON o en la ficha técnica.
+
+#### Paginación y Carga Dinámica
+
+- **Paginación**: Se maneja mediante parámetros en la URL (`?page=2`, `?offset=20`), y los resultados suelen estar disponibles en el JSON embebido o en respuestas XHR.
+- **Carga dinámica**: Muchas páginas de categorías y resultados de búsqueda cargan productos mediante peticiones XHR (fetch/JSON), lo que puede facilitar la extracción directa de endpoints internos si se identifican.
+
+#### Protección Anti-bot y CAPTCHAs
+
+- **CAPTCHAs**: Aparecen tras múltiples peticiones rápidas o patrones sospechosos. Walmart utiliza principalmente reCAPTCHA v2 y v3.
+- **Soluciones**: Uso de proxies residenciales, rotación de User-Agent, pausas aleatorias y servicios anti-CAPTCHA como CapSolver.
+
+---
+
+### Sam's Club México
+
+#### Estructura y Tecnologías
+
+- **Propiedad y plataforma**: Sam's Club México es parte de Walmart de México y utiliza una arquitectura web similar, aunque con personalizaciones para el modelo de membresía y catálogo.
+- **Frontend**: Uso de frameworks modernos (React/Next.js) y carga dinámica de datos.
+- **Datos de producto**: Los detalles suelen estar embebidos en scripts JSON o cargados vía XHR, similar a Walmart.
+- **Protección anti-bot**: Implementa mecanismos de detección de bots, validación de cabeceras y CAPTCHAs, aunque en ocasiones menos estrictos que Walmart.
+
+#### Extracción de Datos
+
+El patrón de extracción es similar al de Walmart, buscando scripts JSON embebidos o endpoints XHR. Es fundamental inspeccionar la estructura de cada página y adaptar los selectores o el parsing de JSON según corresponda.
+
+#### Identificadores
+
+- **SKU y códigos internos**: Presentes en la URL y en los datos embebidos.
+- **Disponibilidad y precios**: Pueden variar según la ubicación y la membresía.
+
+#### Paginación y Carga Dinámica
+
+- **Paginación**: Parámetros en la URL o tokens de cursor en endpoints internos.
+- **Carga dinámica**: Uso de JavaScript para renderizar productos y detalles, lo que puede requerir Selenium o Playwright para scraping robusto.
+
+---
+
+### Bodega Aurrera
+
+#### Estructura y Tecnologías
+
+- **Propiedad**: Bodega Aurrera es una cadena de Walmart México, con una plataforma web propia pero basada en tecnologías similares.
+- **Frontend**: Uso de frameworks modernos, carga dinámica y scripts JSON embebidos.
+- **Datos de producto**: Accesibles en scripts `<script type="application/ld+json">` o en endpoints XHR.
+
+#### Extracción de Datos
+
+- **Scraping directo**: Es posible extraer datos de productos desde páginas de categorías, búsqueda o fichas individuales, parseando el HTML o el JSON embebido.
+- **Servicios comerciales**: Existen scrapers comerciales como Apify y proyectos open source en GitHub que automatizan la extracción de datos de Bodega Aurrera, soportando paginación, búsqueda y extracción masiva.
+
+#### Identificadores
+
+- **SKU y códigos internos**: Presentes en la URL y en los datos embebidos.
+- **Disponibilidad**: Puede variar por tienda, y algunos endpoints permiten consultar stock por ubicación.
+
+#### Paginación y Carga Dinámica
+
+- **Paginación**: Parámetros en la URL (`?page=2`) o tokens de cursor.
+- **Carga dinámica**: Uso de JavaScript para renderizar productos, lo que puede requerir Selenium o Playwright para scraping avanzado.
+
+---
+
+### Tabla Comparativa de Estructura y Protecciones
+
+| Sitio              | Framework/JS | JSON embebido | Carga dinámica | Anti-bot/CAPTCHA | Identificadores | Paginación       |
+|--------------------|--------------|---------------|----------------|------------------|-----------------|------------------|
+| Walmart México     | Next.js      | Sí (__NEXT_DATA__) | Sí            | Avanzado         | SKU, UPC, EAN   | Offset, cursor   |
+| Sam's Club México  | React/Next   | Sí            | Sí             | Medio-Avanzado   | SKU, internos   | Offset, cursor   |
+| Bodega Aurrera     | React/JS     | Sí (JSON-LD)  | Sí             | Medio            | SKU, internos   | Offset, cursor   |
+
+---
+
+## Métodos Recomendados para Extraer Precios, Nombres, Disponibilidad y Descripciones
+
+### Extracción de Datos desde HTML Estático
+
+Cuando los datos están presentes en el HTML inicial, se recomienda usar **Requests** y **BeautifulSoup** para parsear y extraer la información deseada mediante selectores CSS o XPath.
+
+#### Ejemplo de Extracción con Selectores CSS
+
+```python
+from bs4 import BeautifulSoup
+import requests
+
+url = 'https://www.bodegaaurrera.com.mx/categoria/electronica'
+response = requests.get(url)
+soup = BeautifulSoup(response.text, 'html.parser')
+
+for producto in soup.select('div.product-card'):
+    nombre = producto.select_one('.product-name').text.strip()
+    precio = producto.select_one('.price').text.strip()
+    disponibilidad = producto.select_one('.availability').text.strip()
+    descripcion = producto.select_one('.description').text.strip()
+    print(nombre, precio, disponibilidad, descripcion)
+```
+Este patrón es útil para páginas de categorías o listados estáticos.
+
+### Extracción de Datos desde JSON Embebido (__NEXT_DATA__, JSON-LD)
+
+Muchos sitios modernos, especialmente Walmart y Sam's Club, embeben datos completos de producto en scripts JSON. Extraer estos datos es más robusto y menos propenso a romperse ante cambios de diseño.
+
+#### Ejemplo de Extracción de __NEXT_DATA__
+
+```python
+from bs4 import BeautifulSoup
+import requests
+import json
+
+url = 'https://www.walmart.com.mx/producto/123456'
+response = requests.get(url)
+soup = BeautifulSoup(response.text, 'html.parser')
+script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
+if script_tag:
+    data = json.loads(script_tag.string)
+    product = data['props']['pageProps']['initialData']['data']['product']
+    nombre = product.get('name')
+    precio = product.get('price', {}).get('price')
+    disponibilidad = product.get('availability', {}).get('status')
+    descripcion = product.get('description')
+    print(nombre, precio, disponibilidad, descripcion)
+```
+Este método es el más recomendado para Walmart México.
+
+#### Extracción de JSON-LD
+
+Algunos sitios usan `<script type="application/ld+json">` para estructurar datos de producto. Se puede extraer y parsear de forma similar.
+
+### Extracción desde Endpoints XHR
+
+Al inspeccionar las peticiones de red (XHR/fetch) en las herramientas de desarrollador del navegador, es posible identificar endpoints internos que devuelven datos en JSON. Realizar peticiones directas a estos endpoints puede simplificar el scraping y evitar la necesidad de renderizar JavaScript.
+
+#### Ejemplo de Extracción desde Endpoint XHR
+
+```python
+import requests
+
+url = 'https://www.walmart.com.mx/api/productos?categoria=electronica&page=2'
+response = requests.get(url)
+data = response.json()
+for producto in data['items']:
+    print(producto['nombre'], producto['precio'])
+```
+Este método requiere identificar los endpoints correctos y puede cambiar con frecuencia.
+
+### Extracción con Selenium o Playwright
+
+Para páginas que cargan datos solo tras la ejecución de JavaScript, es necesario usar Selenium o Playwright para renderizar la página y extraer el contenido del DOM resultante.
+
+#### Ejemplo con Selenium
+
+```python
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+
+driver = webdriver.Chrome()
+driver.get('https://www.sams.com.mx/categoria/electronica')
+productos = driver.find_elements(By.CLASS_NAME, 'product-card')
+for producto in productos:
+    nombre = producto.find_element(By.CLASS_NAME, 'product-name').text
+    precio = producto.find_element(By.CLASS_NAME, 'price').text
+    print(nombre, precio)
+driver.quit()
+```
+Selenium permite interactuar con la página, hacer scroll, clics y esperar a que los elementos se carguen.
+
+---
+
+## Manejo de Paginación, Offset y Cursor
+
+### Paginación por Offset
+
+La paginación clásica utiliza parámetros como `?page=2` o `?offset=20` para navegar entre páginas de resultados. Es simple de implementar, pero puede ser ineficiente en datasets grandes y propensa a inconsistencias si los datos cambian entre peticiones.
+
+#### Ejemplo de Scraping con Offset
+
+```python
+for page in range(1, 10):
+    url = f'https://www.bodegaaurrera.com.mx/categoria/electronica?page={page}'
+    response = requests.get(url)
+    # Parsear y extraer productos
+```
+
+### Paginación por Cursor
+
+La paginación por cursor utiliza un token opaco que representa la posición en la lista de resultados. Es más eficiente y consistente para grandes volúmenes de datos y listas que cambian frecuentemente.
+
+#### Ejemplo de Scraping con Cursor
+
+```python
+cursor = None
+while True:
+    params = {'limit': 50}
+    if cursor:
+        params['cursor'] = cursor
+    response = requests.get('https://www.walmart.com.mx/api/productos', params=params)
+    data = response.json()
+    for producto in data['items']:
+        print(producto['nombre'])
+    cursor = data['page'].get('nextCursor')
+    if not cursor:
+        break
+```
+Este patrón es común en APIs modernas y endpoints internos de e-commerce.
+
+---
+
+## Carga Dinámica y Renderizado por JavaScript
+
+Muchos sitios modernos cargan datos mediante JavaScript, lo que significa que el HTML inicial no contiene la información deseada. Para estos casos, existen varias estrategias:
+
+- **Selenium/Playwright**: Renderizan la página como un navegador real, permitiendo extraer el DOM final.
+- **Identificación de endpoints XHR**: Analizar las peticiones de red para encontrar APIs internas que devuelvan los datos en JSON.
+- **Uso de servicios comerciales**: Plataformas como Apify, ScrapingBee o Thunderbit ofrecen scraping en la nube con soporte para JavaScript y anti-bot.
+
+---
+
+## CAPTCHAs: Tipos y Soluciones Prácticas
+
+### Tipos de CAPTCHAs
+
+- **reCAPTCHA v2**: Casilla "No soy un robot" y desafíos de imágenes.
+- **reCAPTCHA v3**: Invisible, asigna una puntuación de riesgo.
+- **CAPTCHAs personalizados**: Desafíos propios de la plataforma.
+
+### Soluciones para CAPTCHAs
+
+- **Servicios anti-CAPTCHA**: Plataformas como CapSolver, 2Captcha y Anti-Captcha resuelven CAPTCHAs automáticamente mediante IA o trabajadores humanos.
+- **Rotación de proxies y User-Agent**: Disminuye la frecuencia de aparición de CAPTCHAs.
+- **Pausas aleatorias y simulación de comportamiento humano**: Reduce la probabilidad de ser detectado como bot.
+
+#### Ejemplo de Integración con CapSolver (Python)
+
+```python
+import capsolver
+
+capsolver.api_key = "TU_API_KEY"
+solution = capsolver.solve({
+    "type": "ReCaptchaV2TaskProxyLess",
+    "websiteKey": "CLAVE_DEL_SITIO",
+    "websiteURL": "https://www.walmart.com.mx"
+})
+print("Token resuelto:", solution)
+```
+Este token debe ser enviado junto con la petición protegida por CAPTCHA.
+
+---
+
+## Anti-bot y Detección Avanzada (Fingerprinting, WAFs)
+
+### Técnicas de Detección
+
+- **Fingerprinting**: Detección de patrones en User-Agent, resolución de pantalla, plugins, etc.
+- **WAFs (Web Application Firewalls)**: Filtran tráfico sospechoso y bloquean IPs ruidosas.
+- **Listas negras de IP**: Bloqueo de direcciones IP que realizan muchas peticiones.
+- **Cabeceras HTTP**: Verificación de cabeceras típicas de navegadores reales.
+
+### Estrategias para Evitar Bloqueos
+
+- **Rotación de proxies residenciales o móviles**: Simulan tráfico legítimo desde diferentes ubicaciones.
+- **Rotación de User-Agent y cabeceras**: Cambiar el User-Agent y otras cabeceras en cada petición.
+- **Pausas aleatorias y límites de velocidad**: Evitar patrones de acceso automatizados.
+- **Simulación de comportamiento humano**: Scroll, clics, movimientos de mouse (especialmente con Selenium/Playwright).
+
+---
+
+## Proxies, Rotación de IP y Pools
+
+El uso de proxies es esencial para evitar bloqueos y distribuir la carga de peticiones. Los proxies residenciales y móviles son los más efectivos para scraping en sitios protegidos.
+
+### Tipos de Proxies
+
+- **Proxies residenciales**: IPs asignadas a usuarios reales, difíciles de bloquear.
+- **Proxies de centro de datos**: Más económicos, pero más fáciles de detectar y bloquear.
+- **Proxies móviles**: IPs de redes móviles, alta reputación y baja tasa de bloqueo.
+
+### Plataformas de Proxies
+
+- **ProxyScrape, SmartProxy, Bright Data**: Ofrecen millones de IPs residenciales y móviles, con soporte para rotación automática y segmentación geográfica.
+
+#### Ejemplo de Uso de Proxies en Requests
+
+```python
+proxies = {
+    "http": "http://usuario:contraseña@proxy:puerto",
+    "https": "https://usuario:contraseña@proxy:puerto"
+}
+response = requests.get(url, proxies=proxies)
+```
+
+---
+
+## Alternativas al Scraping: APIs Oficiales y Feeds
+
+Siempre que exista una API oficial, es preferible utilizarla por razones de legalidad, estabilidad y eficiencia.
+
+### API de Walmart
+
+- **API pública**: Permite consultar productos, precios, disponibilidad, imágenes, descripciones, reseñas y más.
+- **Endpoints**: Soportan búsqueda por nombre, categoría, SKU, filtros avanzados y paginación.
+- **Ventajas**: Datos estructurados, actualizados y sin riesgo de bloqueo.
+- **Limitaciones**: Puede requerir registro, claves de acceso y estar sujeta a límites de uso.
+
+#### Ejemplo de Consulta a la API de Walmart
+
+```python
+import requests
+
+endpoint = "https://zylalabs.com/api/9743/walmart+api/18120/buscar"
+params = {"query": "laptop", "page": 1}
+response = requests.get(endpoint, params=params)
+data = response.json()
+for item in data["itemsV2"]:
+    print(item["name"], item["priceInfo"]["currentPrice"]["priceDisplay"])
+```
+La respuesta incluye nombre, precio, disponibilidad, imágenes, reseñas y más.
+
+### API de Seller Center y WFS
+
+- **Walmart Fulfillment Services (WFS)**: API para gestión de inventario, pedidos y precios para vendedores registrados.
+
+### Servicios Comerciales de Scraping
+
+- **Apify, ScrapingBee, ScraperAPI**: Ofrecen scrapers preconfigurados para Walmart, Sam's Club y Bodega Aurrera, con soporte para JavaScript, proxies y anti-bot. Permiten extraer datos masivos sin necesidad de programar desde cero.
+
+---
+
+## Identificadores y Metadatos de Producto (SKU, UPC, EAN, JSON)
+
+- **SKU**: Identificador único de cada producto, visible en la URL y en los datos embebidos.
+- **UPC/EAN/GTIN**: Códigos de barras internacionales, presentes en la ficha técnica o en el JSON de producto.
+- **JSON embebido**: Contiene todos los metadatos relevantes, incluyendo identificadores, precios, descripciones, imágenes y disponibilidad.
+
+---
+
+## Disponibilidad por Tienda y Geolocalización de Stock
+
+Algunos sitios permiten consultar la disponibilidad de productos por tienda o ubicación. Esto puede requerir simular la selección de tienda o enviar parámetros de geolocalización en las peticiones.
+
+- **Walmart y Bodega Aurrera**: Permiten seleccionar tienda y mostrar disponibilidad local.
+- **Método**: Identificar el parámetro de tienda en la URL o en el JSON embebido y ajustar las peticiones en consecuencia.
+
+---
+
+## Estrategias para Evitar Bloqueos y Reducir Tasa de Detección
+
+- **Rotación de proxies y User-Agent** en cada petición.
+- **Pausas aleatorias** entre solicitudes (3–6 segundos).
+- **Gestión de sesiones y cookies** para simular navegación real.
+- **Uso de cabeceras realistas** y simulación de comportamiento humano.
+- **Manejo de errores y reintentos** ante bloqueos o respuestas inesperadas.
+
+---
+
+## Almacenamiento, Esquema de Datos y Normalización
+
+Los datos extraídos deben almacenarse en formatos estructurados como CSV, JSON o bases de datos relacionales (MySQL, PostgreSQL).
+
+### Ejemplo de Esquema de Datos
+
+| Campo           | Tipo     | Descripción                        |
+|-----------------|----------|------------------------------------|
+| sku             | String   | Identificador único del producto   |
+| nombre          | String   | Nombre del producto                |
+| precio          | Float    | Precio actual                      |
+| moneda          | String   | Moneda (MXN, USD)                  |
+| disponibilidad  | String   | Estado de stock                    |
+| descripcion     | String   | Descripción del producto           |
+| url             | String   | URL de la ficha de producto        |
+| imagenes        | Array    | URLs de imágenes                   |
+| categoria       | String   | Categoría o breadcrumb             |
+| tienda          | String   | Tienda o ubicación (si aplica)     |
+
+La normalización y validación de datos es clave para análisis posteriores y comparación entre sitios.
+
+---
+
+## Mantenimiento, Monitorización y Detección de Roturas
+
+- **Monitorización de cambios**: Implementar alertas ante cambios en la estructura HTML, selectores o endpoints.
+- **Pruebas periódicas**: Ejecutar scrapers en intervalos regulares y registrar errores.
+- **Gestión de excepciones**: Manejar errores de red, cambios de estructura y bloqueos de forma robusta.
+- **Actualización de selectores y lógica**: Revisar y ajustar el código ante cambios en el sitio.
+
+---
+
+## Plantillas y Ejemplos de Código
+
+### Extracción de Productos con BeautifulSoup
+
+```python
+import requests
+from bs4 import BeautifulSoup
+
+url = 'https://www.bodegaaurrera.com.mx/categoria/electronica'
+headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+response = requests.get(url, headers=headers)
+soup = BeautifulSoup(response.text, 'html.parser')
+
+for producto in soup.select('div.product-card'):
+    nombre = producto.select_one('.product-name').text.strip()
+    precio = producto.select_one('.price').text.strip()
+    print(nombre, precio)
+```
+
+### Extracción de JSON embebido (__NEXT_DATA__)
+
+```python
+import requests
+from bs4 import BeautifulSoup
+import json
+
+url = 'https://www.walmart.com.mx/producto/123456'
+response = requests.get(url)
+soup = BeautifulSoup(response.text, 'html.parser')
+script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
+if script_tag:
+    data = json.loads(script_tag.string)
+    product = data['props']['pageProps']['initialData']['data']['product']
+    print(product['name'], product['price']['price'])
+```
+
+### Resolución de reCAPTCHA con CapSolver
+
+```python
+import capsolver
+
+capsolver.api_key = "TU_API_KEY"
+solution = capsolver.solve({
+    "type": "ReCaptchaV2TaskProxyLess",
+    "websiteKey": "CLAVE_DEL_SITIO",
+    "websiteURL": "https://www.walmart.com.mx"
+})
+print("Token resuelto:", solution)
+```
+
+---
+
+## Servicios Anti-CAPTCHA y Resolución Automatizada
+
+**CapSolver** es uno de los servicios más rápidos y escalables para resolver CAPTCHAs, con soporte para reCAPTCHA v2, v3, Cloudflare, DataDome y más. Su integración es sencilla y permite resolver desafíos en segundos, facilitando el scraping de sitios protegidos.
+
+---
+
+## Riesgos Legales y Mitigación Contractual
+
+- **Permisos y acuerdos**: Obtener autorización explícita del sitio o del titular de los datos cuando sea posible.
+- **Uso de APIs oficiales**: Priorizar APIs y feeds oficiales para minimizar riesgos legales.
+- **Revisión de propiedad intelectual**: Asegurar que los datos extraídos no infringen derechos de autor ni bases de datos protegidas.
+- **Cumplimiento de la LFPDPPP y GDPR**: No extraer ni procesar datos personales sin base legal clara.
+- **Documentación y transparencia**: Mantener registros de fuentes, métodos y finalidades del scraping.
+
+---
+
+## Casos y Precedentes Legales Internacionales
+
+- **hiQ Labs v. LinkedIn (EE.UU.)**: El scraping de datos públicos no es delito bajo la CFAA, pero puede haber responsabilidad contractual si se violan los términos de servicio.
+- **Feist Publications v. Rural (EE.UU.)**: Los hechos no tienen derechos de autor, pero la estructura de la base de datos sí puede estar protegida.
+- **Directiva 96/9/CE (UE)**: Protección sui generis de bases de datos en la Unión Europea.
+
+---
+
+## Conclusiones y Recomendaciones
+
+El web scraping de Walmart México, Sam's Club y Bodega Aurrera es técnicamente viable, pero requiere una estrategia cuidadosa que combine el uso de tecnologías adecuadas, el respeto a las normativas legales y éticas, y la implementación de medidas robustas para superar protecciones anti-bot y CAPTCHAs. Siempre que sea posible, se recomienda utilizar APIs oficiales o servicios comerciales de scraping para minimizar riesgos y maximizar la eficiencia.
+
+**Recomendaciones clave:**
+
+- Utilizar **Python** con **BeautifulSoup** y **Requests** para scraping básico, y **Selenium** o **Playwright** para páginas dinámicas.
+- Priorizar la extracción de datos desde **JSON embebido** o **endpoints XHR** para mayor robustez.
+- Implementar **rotación de proxies**, **User-Agent** y pausas aleatorias para evitar bloqueos.
+- Integrar **servicios anti-CAPTCHA** como CapSolver para resolver desafíos automáticamente.
+- Respetar siempre los **términos de servicio**, **robots.txt** y la **legislación mexicana** de protección de datos.
+- Documentar y monitorizar el scraper para detectar y corregir roturas rápidamente.
+- Considerar el uso de **APIs oficiales** y servicios comerciales como Apify o ScrapingBee para proyectos a gran escala o con requisitos de alta disponibilidad.
+
+El éxito en el scraping de estos sitios depende tanto de la destreza técnica como del cumplimiento normativo y la ética profesional. Un enfoque responsable y bien documentado permitirá obtener datos valiosos de forma sostenible y segura.
+
+---
+Perfecto, ya tengo un plan de investigación para desarrollar un informe técnico sobre cómo hacer web scraping de Walmart México, Sam's Club y Bodega Aurrera.

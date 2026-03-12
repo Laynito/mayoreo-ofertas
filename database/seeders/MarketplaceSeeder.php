@@ -53,5 +53,38 @@ class MarketplaceSeeder extends Seeder
                 ],
             ]
         );
+
+        Marketplace::updateOrCreate(
+            ['slug' => 'sams_club'],
+            [
+                'nombre' => "Sam's Club México",
+                'url_busqueda' => 'https://www.sams.com.mx/browse/ofertas/3000001',
+                'affiliate_id' => null,
+                'app_id' => null,
+                'es_activo' => false,
+                'configuracion' => [
+                    'urls' => [
+                        'https://www.sams.com.mx/browse/ofertas/3000001',
+                    ],
+                ],
+            ]
+        );
+
+        Marketplace::updateOrCreate(
+            ['slug' => 'bodega_aurrera'],
+            [
+                'nombre' => 'Bodega Aurrera',
+                'url_busqueda' => 'https://www.bodegaaurrera.com.mx/inicio',
+                'affiliate_id' => null,
+                'app_id' => null,
+                'es_activo' => false,
+                'configuracion' => [
+                    'urls' => [
+                        'https://www.bodegaaurrera.com.mx/inicio',
+                        'https://www.bodegaaurrera.com.mx/c/ftp/playstation-promociones-destacados',
+                    ],
+                ],
+            ]
+        );
     }
 }
