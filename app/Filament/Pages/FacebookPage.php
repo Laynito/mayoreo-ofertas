@@ -33,8 +33,12 @@ class FacebookPage extends Page
 
     public ?string $postsError = null;
 
+    public ?array $apiStatus = null;
+
     public function mount(FacebookService $facebook): void
     {
+        $this->apiStatus = $facebook->getApiStatus();
+
         if (! $facebook->hasCredentials()) {
             $this->pageInfo = ['error' => 'Faltan FB_PAGE_ID o FB_PAGE_ACCESS_TOKEN en .env o en Marketplace → Facebook.'];
 

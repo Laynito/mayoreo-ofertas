@@ -75,8 +75,20 @@ class RunScraperCommand extends Command
             }
             $this->info("Ejecutando scraper {$label} (puede tardar unos minutos; salida en tiempo real)...");
             $command = [$pythonBinary, '-u', $pythonScript];
+            $dbConfig = config('database.connections.mysql');
+            $env = array_merge(
+                array_filter(getenv()) ?: [],
+                [
+                    'DB_HOST' => $dbConfig['host'] ?? '',
+                    'DB_PORT' => (string) ($dbConfig['port'] ?? 3306),
+                    'DB_DATABASE' => $dbConfig['database'] ?? '',
+                    'DB_USERNAME' => $dbConfig['username'] ?? '',
+                    'DB_PASSWORD' => (string) ($dbConfig['password'] ?? ''),
+                ]
+            );
             $process = Process::path(base_path())
                 ->timeout(300)
+                ->env($env)
                 ->start($command);
 
             while ($process->running()) {

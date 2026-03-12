@@ -26,6 +26,9 @@ class AdminPanelProvider extends PanelProvider
             ->default()
             ->id('admin')
             ->path('admin')
+            ->brandName('Cazador De Precios')
+            ->brandLogo(asset('logo/logo.png'))
+            ->brandLogoHeight('3rem')
             ->login()
             ->colors([
                 'primary' => Color::Amber,
@@ -34,6 +37,7 @@ class AdminPanelProvider extends PanelProvider
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\\Filament\\Pages')
             ->pages([
                 Pages\Dashboard::class,
+                \App\Filament\Pages\MetricasAfiliadosPage::class,
             ])
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')
             ->widgets([

@@ -21,6 +21,7 @@ class Producto extends Model
         'url_imagen',
         'tienda',
         'last_published_at',
+        'last_sent_telegram_at',
     ];
 
     protected $casts = [
@@ -28,6 +29,7 @@ class Producto extends Model
         'precio_original' => 'decimal:2',
         'descuento' => 'integer',
         'last_published_at' => 'datetime',
+        'last_sent_telegram_at' => 'datetime',
     ];
 
     protected static function booted(): void
@@ -35,7 +37,7 @@ class Producto extends Model
         static::creating(function (Producto $producto): void {
             if (empty($producto->url_afiliado) && ! empty($producto->url_producto)) {
                 $producto->url_afiliado = app(AffiliateService::class)
-                    ->getCanonicalAffiliateLink($producto->url_producto);
+                    ->getAffiliateLinkForProduct($producto->url_producto, $producto->tienda);
             }
         });
 

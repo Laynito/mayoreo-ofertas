@@ -36,5 +36,22 @@ class MarketplaceSeeder extends Seeder
                 'configuracion' => null,
             ]
         );
+
+        Marketplace::updateOrCreate(
+            ['slug' => 'elektra'],
+            [
+                'nombre' => 'Elektra',
+                'url_busqueda' => 'https://www.elektra.mx/liquidacion',
+                'affiliate_id' => null,
+                'app_id' => null,
+                'es_activo' => true,
+                'configuracion' => [
+                    'urls' => [
+                        'https://www.elektra.mx/liquidacion',
+                        'https://www.elektra.mx/ofertas',
+                    ],
+                ],
+            ]
+        );
     }
 }

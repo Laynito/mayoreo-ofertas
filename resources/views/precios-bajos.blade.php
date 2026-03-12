@@ -13,7 +13,7 @@
             @foreach($productos as $p)
                 <article class="card">
                     @if($p->url_imagen)
-                        <a href="{{ $p->url_afiliado ?: app(\App\Services\AffiliateService::class)->getCanonicalAffiliateLink($p->url_producto) }}" target="_blank" rel="noopener nofollow">
+                        <a href="{{ $p->url_afiliado ?: app(\App\Services\AffiliateService::class)->getAffiliateLinkForProduct($p->url_producto, $p->tienda) }}" target="_blank" rel="noopener nofollow">
                             <img src="{{ $p->url_imagen }}" alt="" loading="lazy">
                         </a>
                     @endif
@@ -25,7 +25,7 @@
                         @else
                             <p class="meta">{{ $p->tienda ?? '—' }}</p>
                         @endif
-                        <a class="oferta" href="{{ $p->url_afiliado ?: app(\App\Services\AffiliateService::class)->getCanonicalAffiliateLink($p->url_producto) }}" target="_blank" rel="noopener nofollow">Ver oferta →</a>
+                        <a class="oferta" href="{{ $p->url_afiliado ?: app(\App\Services\AffiliateService::class)->getAffiliateLinkForProduct($p->url_producto, $p->tienda) }}" target="_blank" rel="noopener nofollow">Ver oferta →</a>
                     </div>
                 </article>
             @endforeach

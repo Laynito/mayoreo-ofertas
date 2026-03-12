@@ -53,6 +53,47 @@ class FacebookService
     }
 
     /**
+     * Estado de la conexión con la API: credenciales, token y acceso a la página.
+     *
+     * @return array{ok: bool, message: string, credentials: bool, token_valid: bool, page_name: string|null, error_code: int|null, error_message: string|null}
+     */
+    public function getApiStatus(): array
+    {
+        $result = [
+            'ok' => false,
+            'message' => '',
+            'credentials' => $this->hasCredentials(),
+            'token_valid' => false,
+            'page_name' => null,
+            'error_code' => null,
+            'error_message' => null,
+        ];
+
+        if (! $this->hasCredentials()) {
+            $result['message'] = 'Sin configurar: faltan FB_PAGE_ID o FB_PAGE_ACCESS_TOKEN.';
+
+            return $result;
+        }
+
+        $pageInfo = $this->getPageInfo();
+        if (isset($pageInfo['error'])) {
+            $err = $pageInfo['error'];
+            $result['message'] = is_array($err) ? ($err['message'] ?? 'Error de la API') : (string) $err;
+            $result['error_code'] = is_array($err) ? ($err['code'] ?? null) : null;
+            $result['error_message'] = $result['message'];
+
+            return $result;
+        }
+
+        $result['ok'] = true;
+        $result['token_valid'] = true;
+        $result['page_name'] = $pageInfo['name'] ?? null;
+        $result['message'] = 'Conectado. La API responde correctamente.';
+
+        return $result;
+    }
+
+    /**
      * Insights de la página (alcance, impresiones, etc.).
      * Requiere permiso read_insights. Solo disponible si la página tiene 100+ me gusta.
      *
@@ -94,16 +135,22 @@ class FacebookService
     /**
      * Publicaciones recientes de la página (feed publicado).
      *
+     * @param  bool  $withEngagement  Incluir reacciones y comentarios (total_count) para cada post
      * @return array{data: array, error?: array}
      */
-    public function getPublishedPosts(int $limit = 25): array
+    public function getPublishedPosts(int $limit = 25, bool $withEngagement = false): array
     {
         if (! $this->hasCredentials()) {
             return ['data' => [], 'error' => ['message' => 'Faltan credenciales de Facebook.']];
         }
 
+        $fields = 'id,message,created_time,permalink_url,full_picture,attachments{media}';
+        if ($withEngagement) {
+            $fields .= ',reactions.summary(true),comments.summary(true)';
+        }
+
         $params = [
-            'fields' => 'id,message,created_time,permalink_url,full_picture,attachments{media}',
+            'fields' => $fields,
             'limit' => $limit,
             'access_token' => $this->accessToken,
         ];
@@ -117,6 +164,18 @@ class FacebookService
         }
 
         return $response->json();
+    }
+
+    /**
+     * Devuelve el total de interacción de un post (reacciones + comentarios).
+     * El post debe venir de getPublishedPosts(..., true).
+     */
+    public static function getPostEngagementCount(array $post): int
+    {
+        $reactions = (int) ($post['reactions']['summary']['total_count'] ?? 0);
+        $comments = (int) ($post['comments']['summary']['total_count'] ?? 0);
+
+        return $reactions + $comments;
     }
 
     /**

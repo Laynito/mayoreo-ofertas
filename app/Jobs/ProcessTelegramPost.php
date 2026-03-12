@@ -25,6 +25,10 @@ class ProcessTelegramPost implements ShouldQueue
     {
         $ok = $telegram->sendOffer($this->producto);
 
+        if ($ok) {
+            $this->producto->updateQuietly(['last_sent_telegram_at' => now()]);
+        }
+
         if (! $ok) {
             // Si Telegram devolvió retry_after, esperar ese tiempo antes del siguiente intento
             $retryAfter = $telegram->getLastRetryAfter();

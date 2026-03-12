@@ -1,10 +1,23 @@
 <?php
 
 use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\OfertasController;
 use App\Http\Controllers\PreciosBajosController;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', function () {
+// Público (sin registro): ofertas para TikTok / link en bio
+Route::get('/', [OfertasController::class, 'index'])->name('ofertas.dia');
+Route::get('/ofertas', [OfertasController::class, 'index']);
+Route::get('/ofertas/todas', [OfertasController::class, 'todas'])->name('ofertas.todas');
+
+// Páginas legales (TikTok for Developers: Terms of Service, Privacy Policy)
+Route::get('/terminos', fn () => view('legal.terminos'))->name('terminos');
+Route::get('/aviso-de-privacidad', fn () => view('legal.aviso-privacidad'))->name('aviso-privacidad');
+
+// Tracking de clicks: redirige al afiliado y registra (métricas ML, Coppel, etc.)
+Route::get('/out/{producto}', \App\Http\Controllers\OutController::class)->name('out');
+
+Route::get('/welcome', function () {
     return view('welcome');
 });
 

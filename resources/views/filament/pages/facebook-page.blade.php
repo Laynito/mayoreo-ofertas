@@ -1,4 +1,24 @@
 <x-filament-panels::page>
+    {{-- Estado de la API --}}
+    @if($apiStatus !== null)
+        <div class="rounded-xl border p-4 mb-6 {{ $apiStatus['ok'] ?? false ? 'bg-green-50 dark:bg-green-950/20 border-green-200 dark:border-green-800' : 'bg-red-50 dark:bg-red-950/20 border-red-200 dark:border-red-800' }}">
+            <div class="flex items-center gap-3">
+                <span class="text-2xl">{{ $apiStatus['ok'] ?? false ? '✓' : '✗' }}</span>
+                <div class="min-w-0 flex-1">
+                    <p class="font-semibold {{ $apiStatus['ok'] ?? false ? 'text-green-800 dark:text-green-200' : 'text-red-800 dark:text-red-200' }}">
+                        Estado de la API: {{ $apiStatus['ok'] ?? false ? 'Conectado' : 'Error' }}
+                    </p>
+                    <p class="text-sm {{ $apiStatus['ok'] ?? false ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300' }} mt-0.5">
+                        {{ $apiStatus['message'] ?? '—' }}
+                    </p>
+                    @if(!empty($apiStatus['error_code']))
+                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Código: {{ $apiStatus['error_code'] }}</p>
+                    @endif
+                </div>
+            </div>
+        </div>
+    @endif
+
     @if(isset($pageInfo['error']))
         <div class="rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 p-4 mb-4">
             <p class="text-sm font-medium text-amber-800 dark:text-amber-200">{{ $pageInfo['error'] }}</p>

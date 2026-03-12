@@ -13,7 +13,7 @@ class ViewProducto extends ViewRecord
     protected function mutateFormDataBeforeFill(array $data): array
     {
         if (! empty($data['url_producto'])) {
-            $data['url_afiliado'] = app(AffiliateService::class)->getCanonicalAffiliateLink($data['url_producto']);
+            $data['url_afiliado'] = app(AffiliateService::class)->getAffiliateLinkForProduct($data['url_producto'], $data['tienda'] ?? null);
         }
         return $data;
     }

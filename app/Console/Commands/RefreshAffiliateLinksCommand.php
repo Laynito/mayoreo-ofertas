@@ -31,12 +31,12 @@ class RefreshAffiliateLinksCommand extends Command
         $updated = 0;
         $query->chunkById(100, function ($productos) use ($affiliate, $dryRun, &$updated, $bar) {
             foreach ($productos as $producto) {
-                $canonical = $affiliate->getCanonicalAffiliateLink($producto->url_producto);
+                $correctLink = $affiliate->getAffiliateLinkForProduct($producto->url_producto, $producto->tienda);
                 $old = $producto->url_afiliado;
-                $isClickUrl = $old && (str_contains($old, 'click1.mercadolibre') || str_contains($old, 'mclics/clicks'));
-                if ($old !== $canonical || $isClickUrl) {
+                $isClickUrl = $old && (str_contains((string) $old, 'click1.mercadolibre') || str_contains((string) $old, 'mclics/clicks'));
+                if ($old !== $correctLink || $isClickUrl) {
                     if (! $dryRun) {
-                        $producto->url_afiliado = $canonical;
+                        $producto->url_afiliado = $correctLink;
                         $producto->saveQuietly();
                     }
                     $updated++;
@@ -49,7 +49,7 @@ class RefreshAffiliateLinksCommand extends Command
         $this->newLine(2);
         $this->info($dryRun
             ? "Se actualizarían {$updated} enlace(s). Ejecuta sin --dry-run para aplicar."
-            : "Listo. Se actualizaron {$updated} enlace(s) a la URL canónica (sin click1.mercadolibre).");
+            : "Listo. Se actualizaron {$updated} enlace(s) (ML=afiliado ML, Coppel/otros=su código).");
 
         return self::SUCCESS;
     }

@@ -51,12 +51,117 @@ class AffiliateService
     }
 
     /**
-     * Alias para compatibilidad con código que llame convertToAffiliateLink.
-     * Genera enlace canónico (estable) en lugar de depender de la API de clicks.
+     * Genera el enlace según la tienda (o la URL si tienda viene vacía). ML siempre lleva parámetros de afiliado;
+     * Coppel y otros usan su código desde config (configuracion.affiliate_params).
+     * Si la URL es de Mercado Libre se trata como ML aunque tienda no lo indique.
      */
-    public function convertToAffiliateLink(string $urlProducto): string
+    public function getAffiliateLinkForProduct(string $urlProducto, ?string $tienda = null): string
     {
-        return $this->getCanonicalAffiliateLink($urlProducto);
+        $urlProducto = trim($urlProducto);
+        if ($urlProducto === '') {
+            return '';
+        }
+        $slug = $this->normalizeTiendaToSlug($tienda) ?? $this->slugFromUrl($urlProducto);
+        if ($slug === 'mercado_libre') {
+            return $this->getCanonicalAffiliateLink($urlProducto);
+        }
+        if ($slug !== null) {
+            return $this->appendMarketplaceAffiliateParams($urlProducto, $slug);
+        }
+        return $urlProducto;
+    }
+
+    /**
+     * Alias para compatibilidad. Con tienda usa enlace por marketplace; sin tienda mantiene ML.
+     */
+    public function convertToAffiliateLink(string $urlProducto, ?string $tienda = null): string
+    {
+        return $this->getAffiliateLinkForProduct($urlProducto, $tienda);
+    }
+
+    /**
+     * Devuelve el slug del marketplace: primero por tienda, si no por URL (para prioridad Telegram y enlaces).
+     * Así los productos de ML se reconocen aunque tienda venga vacía o incorrecta.
+     */
+    public function getSlugFromTienda(?string $tienda, ?string $urlProducto = null): ?string
+    {
+        return $this->normalizeTiendaToSlug($tienda) ?? ($urlProducto !== null && $urlProducto !== '' ? $this->slugFromUrl($urlProducto) : null);
+    }
+
+    /**
+     * Inferir slug del marketplace desde la URL del producto (ML, Coppel, Walmart).
+     * Útil cuando tienda viene vacía o incorrecta para que ML sea más preciso.
+     */
+    public function slugFromUrl(?string $url): ?string
+    {
+        if ($url === null || trim($url) === '') {
+            return null;
+        }
+        $host = parse_url($url, PHP_URL_HOST);
+        if ($host === false || $host === null) {
+            return null;
+        }
+        $host = strtolower($host);
+        if (str_contains($host, 'mercadolibre') || str_contains($host, 'mercadolibre.com')) {
+            return 'mercado_libre';
+        }
+        if (str_contains($host, 'coppel')) {
+            return 'coppel';
+        }
+        if (str_contains($host, 'walmart')) {
+            return 'walmart';
+        }
+        if (str_contains($host, 'elektra.mx')) {
+            return 'elektra';
+        }
+        return null;
+    }
+
+    /**
+     * Normaliza el nombre de tienda del producto al slug del marketplace (mercado_libre, coppel, walmart, elektra).
+     */
+    private function normalizeTiendaToSlug(?string $tienda): ?string
+    {
+        if ($tienda === null || trim($tienda) === '') {
+            return null;
+        }
+        $t = strtolower(trim($tienda));
+        if (str_contains($t, 'mercado') || $t === 'ml' || str_contains($t, 'mercadolibre')) {
+            return 'mercado_libre';
+        }
+        if (str_contains($t, 'coppel')) {
+            return 'coppel';
+        }
+        if (str_contains($t, 'walmart')) {
+            return 'walmart';
+        }
+        if (str_contains($t, 'elektra')) {
+            return 'elektra';
+        }
+        return null;
+    }
+
+    /**
+     * Añade parámetros de afiliado del marketplace (configuracion.affiliate_params: { "param": "valor" }).
+     * Si no hay config, devuelve la URL sin cambios.
+     */
+    private function appendMarketplaceAffiliateParams(string $url, string $slug): string
+    {
+        $marketplace = Marketplace::query()->where('slug', $slug)->where('es_activo', true)->first();
+        if (! $marketplace || ! is_array($marketplace->configuracion ?? null)) {
+            return $url;
+        }
+        $params = $marketplace->configuracion['affiliate_params'] ?? null;
+        if (! is_array($params) || $params === []) {
+            return $url;
+        }
+        $url = trim($url);
+        $separator = str_contains($url, '?') ? '&' : '?';
+        $query = http_build_query(array_filter($params, fn ($v) => $v !== null && $v !== ''));
+        if ($query === '') {
+            return $url;
+        }
+        return $url . $separator . $query;
     }
 
     /** TTL de caché para la configuración del marketplace (segundos). */

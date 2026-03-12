@@ -77,9 +77,56 @@ class MarketplaceResource extends Resource
                     ->visible(fn ($get, $record) => $record?->slug === 'facebook')
                     ->collapsible(),
 
+                Forms\Components\Section::make('TikTok (Development / perfil)')
+                    ->description('Bio, descripción de la app (120 caracteres), URLs legales y credenciales para TikTok for Developers.')
+                    ->schema([
+                        Forms\Components\TextInput::make('configuracion.bio_description')
+                            ->label('Descripción de perfil (bio)')
+                            ->placeholder('Ej: Ofertas del día en ML, Coppel y más. Precios bajos. Link en bio 👇')
+                            ->maxLength(80)
+                            ->live(onBlur: true)
+                            ->helperText('Máximo 80 caracteres. Para la bio del perfil de TikTok.')
+                            ->columnSpanFull(),
+                        Forms\Components\TextInput::make('configuracion.app_description')
+                            ->label('Description (app, 120 caracteres)')
+                            ->placeholder('A website that shows daily deals from Mercado Libre, Coppel and more. Use the link in bio to shop.')
+                            ->maxLength(120)
+                            ->live(onBlur: true)
+                            ->helperText('Obligatorio en TikTok for Developers. Se muestra a los usuarios. Máx. 120 caracteres.')
+                            ->columnSpanFull(),
+                        Forms\Components\TextInput::make('configuracion.terms_of_service_url')
+                            ->label('Terms of Service URL')
+                            ->placeholder('https://mayoreo.cloud/terminos')
+                            ->url()
+                            ->helperText('Obligatorio. Enlace a los términos de uso de tu sitio.'),
+                        Forms\Components\TextInput::make('configuracion.privacy_policy_url')
+                            ->label('Privacy Policy URL')
+                            ->placeholder('https://mayoreo.cloud/aviso-de-privacidad')
+                            ->url()
+                            ->helperText('Obligatorio. Enlace al aviso de privacidad.'),
+                        Forms\Components\TextInput::make('configuracion.client_key')
+                            ->label('Client Key')
+                            ->placeholder('Client key de tu app en developers.tiktok.com')
+                            ->helperText('Opcional. Lo obtienes en Manage apps → tu app → App key.'),
+                        Forms\Components\TextInput::make('configuracion.client_secret')
+                            ->label('Client Secret')
+                            ->password()
+                            ->revealable()
+                            ->placeholder('Client secret de la app')
+                            ->helperText('Opcional. Para Share Kit, Content Posting API, etc. También puedes usar .env TIKTOK_CLIENT_SECRET.'),
+                    ])
+                    ->columns(1)
+                    ->visible(fn ($get, $record) => $record?->slug === 'tiktok')
+                    ->collapsible(),
+
                 Forms\Components\Section::make('Configuración de afiliados')
                     ->description('IDs y URL base para enlaces de afiliado y búsqueda de ofertas.')
                     ->schema([
+                        Forms\Components\Toggle::make('configuracion.es_afiliados')
+                            ->label('Es programa de afiliados')
+                            ->default(false)
+                            ->helperText('Marcar si este marketplace tiene programa de afiliados. Tendrá prioridad al enviar ofertas a Telegram (primero ML, luego Coppel, luego otros). Los no marcados se usan para generar contenido sin afiliado.')
+                            ->columnSpanFull(),
                         Forms\Components\TextInput::make('affiliate_id')
                             ->label('ID de afiliado (affid)')
                             ->placeholder('Ej: 187001804'),
@@ -180,6 +227,18 @@ class MarketplaceResource extends Resource
                     ->label('Activo')
                     ->boolean()
                     ->sortable(),
+                Tables\Columns\IconColumn::make('configuracion.es_afiliados')
+                    ->label('Afiliados')
+                    ->boolean()
+                    ->getStateUsing(fn (Marketplace $r) => (bool) ($r->configuracion['es_afiliados'] ?? false))
+                    ->sortable(query: function ($query, string $direction) {
+                        $driver = $query->getConnection()->getDriverName();
+                        $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
+                        if ($driver === 'mysql') {
+                            return $query->orderByRaw("JSON_UNQUOTE(JSON_EXTRACT(configuracion, '$.es_afiliados')) {$dir}");
+                        }
+                        return $query->orderByRaw("json_extract(configuracion, '$.es_afiliados') {$dir}");
+                    }),
                 Tables\Columns\TextColumn::make('affiliate_id')
                     ->label('ID afiliado')
                     ->toggleable(isToggledHiddenByDefault: true),

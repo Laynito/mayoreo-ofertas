@@ -29,12 +29,11 @@ class TelegramService
     }
 
     /**
-     * Envía una oferta al canal usando sendPhoto y el formato acordado.
-     * El enlace "Ver Oferta" usa siempre la URL canónica de producto + matt_tool, matt_word, affid (ML_AFFID).
+     * Envía una oferta al canal. Enlace: URL de tracking (/out/{id}) para registrar clicks (ML, Coppel, etc.).
      */
     public function sendOffer(Producto $producto): bool
     {
-        $urlAfiliado = app(AffiliateService::class)->getCanonicalAffiliateLink($producto->url_producto);
+        $urlAfiliado = url()->route('out', ['producto' => $producto->id]);
         $precioOriginal = $producto->precio_original
             ? number_format((float) $producto->precio_original, 2)
             : '—';

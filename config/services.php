@@ -57,6 +57,11 @@ return [
         'graph_version' => env('FB_GRAPH_VERSION', 'v20.0'),
     ],
 
+    'tiktok' => [
+        'client_key' => env('TIKTOK_CLIENT_KEY'),
+        'client_secret' => env('TIKTOK_CLIENT_SECRET'),
+    ],
+
     /*
      * Admitad: red de afiliados. Credenciales en cuenta Admitad → Webmaster → Configuración → Mostrar credenciales.
      */

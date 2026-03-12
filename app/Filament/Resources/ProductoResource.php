@@ -66,44 +66,60 @@ class ProductoResource extends Resource
         return $table
             ->columns([
                 Tables\Columns\ImageColumn::make('url_imagen')
-                    ->label('Imagen')
+                    ->label('')
                     ->circular()
-                    ->checkFileExistence(false),
+                    ->size(36)
+                    ->checkFileExistence(false)
+                    ->width('2.5rem'),
                 Tables\Columns\TextColumn::make('nombre')
                     ->searchable()
-                    ->limit(50),
+                    ->limit(42)
+                    ->wrap()
+                    ->tooltip(fn (Producto $record): string => $record->nombre),
                 Tables\Columns\TextColumn::make('sku')
                     ->searchable()
-                    ->copyable(),
+                    ->copyable()
+                    ->width('6rem'),
                 Tables\Columns\TextColumn::make('precio_actual')
                     ->money('MXN')
-                    ->sortable(),
+                    ->sortable()
+                    ->width('6rem'),
                 Tables\Columns\TextColumn::make('precio_original')
                     ->money('MXN')
                     ->sortable()
-                    ->placeholder('—'),
+                    ->placeholder('—')
+                    ->width('6rem'),
                 Tables\Columns\TextColumn::make('descuento')
                     ->suffix('%')
                     ->sortable()
                     ->badge()
-                    ->color(fn (int $state): string => $state > 20 ? 'success' : ($state > 0 ? 'warning' : 'gray')),
+                    ->color(fn (int $state): string => $state > 20 ? 'success' : ($state > 0 ? 'warning' : 'gray'))
+                    ->width('4rem'),
                 Tables\Columns\TextColumn::make('url_afiliado')
                     ->label('Link afiliado')
                     ->limit(40)
-                    ->url(fn (Producto $record): ?string => $record->url_producto ? app(AffiliateService::class)->getCanonicalAffiliateLink($record->url_producto) : null)
+                    ->url(fn (Producto $record): ?string => $record->url_afiliado ?: ($record->url_producto ? app(AffiliateService::class)->getAffiliateLinkForProduct($record->url_producto, $record->tienda) : null))
                     ->openUrlInNewTab()
                     ->copyable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('tienda')
-                    ->badge(),
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state): string => match (true) {
+                        stripos((string) $state, 'mercado') !== false => 'ML',
+                        stripos((string) $state, 'coppel') !== false => 'Coppel',
+                        default => $state ?? '—',
+                    })
+                    ->tooltip(fn (?string $state): string => $state ?? '')
+                    ->width('4.5rem'),
             ])
+            ->striped()
             ->defaultSort('created_at', 'desc')
             ->filters([])
             ->actions([
                 Tables\Actions\ViewAction::make(),
                 Tables\Actions\Action::make('ver_oferta')
                     ->label('Ver Oferta')
-                    ->url(fn (Producto $record): string => app(AffiliateService::class)->getCanonicalAffiliateLink($record->url_producto))
+                    ->url(fn (Producto $record): string => $record->url_afiliado ?: app(AffiliateService::class)->getAffiliateLinkForProduct($record->url_producto, $record->tienda))
                     ->openUrlInNewTab()
                     ->icon('heroicon-o-arrow-top-right-on-square'),
                 Tables\Actions\Action::make('enviar_telegram')

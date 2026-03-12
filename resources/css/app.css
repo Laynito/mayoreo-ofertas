@@ -9,3 +9,8 @@
     --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
         'Segoe UI Symbol', 'Noto Color Emoji';
 }
+
+/* Panel productos: sin scroll horizontal en el contenedor de la tabla */
+.fi-ta-content {
+    overflow-x: hidden !important;
+}
